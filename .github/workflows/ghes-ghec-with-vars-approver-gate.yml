@@ -233,8 +233,7 @@ jobs:
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 360
     needs: [pre-migration-validation]
-    if: ${{ always()
-      && inputs.run_migration == 'true'
+    if: ${{ inputs.run_migration == 'true'
       && (needs.pre-migration-validation.result == 'success'
           || needs.pre-migration-validation.result == 'skipped') }}
   
@@ -252,7 +251,11 @@ jobs:
       - name: Install GEI extension
         run: |
           set -euo pipefail
-          echo "$GH_PAT" | gh auth login --with-token
+          if [[ -z "$GH_TARGET_HOST" ]]; then
+            echo "$GH_PAT" | gh auth login --with-token
+          else
+            echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
+          fi
           gh extension install https://github.com/github/gh-gei || true
   
       - name: Make scripts executable
@@ -263,7 +266,7 @@ jobs:
           set -euo pipefail
           cp "${{ inputs.csv_path }}" scripts/repos.csv
   
-      # ✅ RUN ALL REPOS (NO EARLY FAILURE)
+      # ✅ MAIN MIGRATION (runs all repos, script should not exit early)
       - name: Run migration (parallel)
         run: |
           set -euo pipefail
@@ -273,7 +276,7 @@ jobs:
             --output repo_migration_output.csv \
             | tee migration.log
   
-      # ✅ CAPTURE LOGS
+      # ✅ LOG CAPTURE (always runs)
       - name: Capture logs
         if: always()
         run: |
@@ -286,7 +289,7 @@ jobs:
   
           tar -czf octoshift-logs.tgz octoshift-logs
   
-      # ✅ SUMMARY
+      # ✅ SUMMARY (always runs)
       - name: Publish summary
         if: always()
         run: |
@@ -299,61 +302,64 @@ jobs:
   
           def w(line=""):
             if summary.exists():
-              summary.write_text(summary.read_text() + line + "\n")
+              summary.write_text(summary.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
             else:
-              summary.write_text(line + "\n")
+              summary.write_text(line + "\n", encoding="utf-8")
   
-          w("## 🚀 Migration Summary")
+          w("## 🚀 Migration Summary (GHES → GitHub)")
+          w("")
   
           if not out.exists():
-            w("❌ Output file missing")
+            w("❌ repo_migration_output.csv not found")
             raise SystemExit(0)
   
-          rows = list(csv.DictReader(out.open()))
-          success = sum(1 for r in rows if r["Migration_Status"].lower().startswith("success"))
-          failure = sum(1 for r in rows if r["Migration_Status"].lower().startswith("failure"))
+          rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
   
-          w(f"- ✅ Success: {success}")
-          w(f"- ❌ Failure: {failure}")
+          success = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("success"))
+          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith(("fail", "error")))
+  
+          w(f"- ✅ Success: **{success}**")
+          w(f"- ❌ Failure: **{failure}**")
   
           if failure > 0:
             w("")
-            w("### ⚠️ Some repositories failed")
+            w("### ❌ Stage will be marked FAILED (repo failures detected)")
           PY
   
-      # ✅ ✅ FINAL FAIL CONTROL (THIS IS KEY)
+      # ✅ ✅ FINAL FAILURE CONTROL (ROBUST VERSION)
       - name: Fail job if any repo failed
         if: always()
-        shell: bash
         run: |
           set -euo pipefail
   
-          if [[ ! -f repo_migration_output.csv ]]; then
-            echo "❌ Missing output CSV"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import csv, sys
+          
+          try:
+              with open("repo_migration_output.csv", newline="", encoding="utf-8") as f:
+                  rows = list(csv.DictReader(f))
+          except FileNotFoundError:
+              print("❌ repo_migration_output.csv not found")
+              sys.exit(1)
+          
+          fail_count = 0
+          
+          for r in rows:
+              status = (r.get("Migration_Status") or "").strip().lower()
+              if "fail" in status or "error" in status:
+                  fail_count += 1
   
-          FAIL_COUNT=$(awk -F',' '
-          NR==1 {
-            for(i=1;i<=NF;i++){
-              if(tolower($i)=="Migration_Status"){col=i}
-            }
-          }
-          NR>1 && tolower($col) ~ /Failure/ {count++}
-          END {print count+0}
-          ' repo_migration_output.csv)
+          print(f"❌ Failed repos: {fail_count}")
+          
+          if fail_count > 0:
+              print("❌ Marking job FAILED because at least one repo failed")
+              sys.exit(1)
+          else:
+              print("✅ All repositories migrated successfully")
+          PY
   
-          echo "❌ Failed repos: $FAIL_COUNT"
-  
-          if [[ "$FAIL_COUNT" -gt 0 ]]; then
-            echo "❌ Marking job FAILED because at least one repo failed"
-            exit 1
-          else
-            echo "✅ All migrations successful"
-          fi
-  
-      # ✅ ARTIFACTS (still uploaded)
-      - name: Upload artifacts
+      # ✅ ARTIFACTS (always uploaded even on failure)
+      - name: Upload migration artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
