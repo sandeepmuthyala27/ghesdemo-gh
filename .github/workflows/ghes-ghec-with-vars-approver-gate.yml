@@ -336,10 +336,10 @@ jobs:
           FAIL_COUNT=$(awk -F',' '
           NR==1 {
             for(i=1;i<=NF;i++){
-              if(tolower($i)=="migration_status"){col=i}
+              if(tolower($i)=="Migration_Status"){col=i}
             }
           }
-          NR>1 && tolower($col) ~ /^failure/ {count++}
+          NR>1 && tolower($col) ~ /Failure/ {count++}
           END {print count+0}
           ' repo_migration_output.csv)
   
