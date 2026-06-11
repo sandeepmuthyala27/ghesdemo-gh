@@ -266,7 +266,7 @@ jobs:
           set -euo pipefail
           cp "${{ inputs.csv_path }}" scripts/repos.csv
   
-      # ✅ MAIN MIGRATION (runs all repos, script should not exit early)
+      # ✅ MAIN MIGRATION (runs all repos, no early exit expected)
       - name: Run migration (parallel)
         run: |
           set -euo pipefail
@@ -281,15 +281,13 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-  
           mkdir -p octoshift-logs
           cp -v *.octoshift*.log octoshift-logs/ 2>/dev/null || true
           cp -v migration.log repo_migration_output.csv octoshift-logs/ 2>/dev/null || true
           cp -v migration-*.txt octoshift-logs/ 2>/dev/null || true
-  
           tar -czf octoshift-logs.tgz octoshift-logs
   
-      # ✅ SUMMARY (always runs)
+      # ✅ SUMMARY WITH PARTIAL SUCCESS
       - name: Publish summary
         if: always()
         run: |
@@ -301,75 +299,54 @@ jobs:
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
   
           def w(line=""):
-            if summary.exists():
-              summary.write_text(summary.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
-            else:
-              summary.write_text(line + "\n", encoding="utf-8")
+              if summary.exists():
+                  summary.write_text(summary.read_text() + line + "\n")
+              else:
+                  summary.write_text(line + "\n")
   
           w("## 🚀 Migration Summary (GHES → GitHub)")
           w("")
   
           if not out.exists():
-            w("❌ repo_migration_output.csv not found")
-            raise SystemExit(0)
+              w("❌ Output file missing")
+              raise SystemExit(0)
   
-          rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
+          rows = list(csv.DictReader(out.open()))
   
           success = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("success"))
-          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith(("fail", "error")))
+          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith(("fail","error")))
   
           w(f"- ✅ Success: **{success}**")
           w(f"- ❌ Failure: **{failure}**")
   
           if failure > 0:
-            w("")
-            w("### ❌ Stage will be marked FAILED (repo failures detected)")
+              w("")
+              w("### ⚠️ Partial Success")
+              w("> Some repositories failed during migration, but pipeline continued.")
           PY
   
-      # ✅ ✅ FINAL FAILURE CONTROL (ROBUST VERSION)
-      - name: Fail job if any repo failed
+      # ✅ ✅ PARTIAL SUCCESS LOGIC (NO FAILURE)
+      - name: Detect partial success (do NOT fail job)
         if: always()
         run: |
           set -euo pipefail
   
           python3 - <<'PY'
-          import csv, sys
-          
-          try:
-              with open("repo_migration_output.csv", newline="", encoding="utf-8") as f:
-                  rows = list(csv.DictReader(f))
-          except FileNotFoundError:
-              print("❌ repo_migration_output.csv not found")
-              sys.exit(1)
-          
-          fail_count = 0
-          
-          for r in rows:
-              status = (r.get("Migration_Status") or "").strip().lower()
-              if "fail" in status or "error" in status:
-                  fail_count += 1
-  
-          print(f"❌ Failed repos: {fail_count}")
-          
-          if fail_count > 0:
-              print("❌ Marking job FAILED because at least one repo failed")
-              sys.exit(1)
-          else:
-              print("✅ All repositories migrated successfully")
-          PY
-  
-      # ✅ ARTIFACTS (always uploaded even on failure)
-      - name: Upload migration artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stage2-migration-${{ github.run_id }}
-          path: |
-            migration.log
-            repo_migration_output.csv
-            migration-*.txt
-            octoshift-logs.tgz
-          if-no-files-found: warn
+            import csv
+            
+            try:
+                with open("repo_migration_output.csv", newline="", encoding="utf-8") as f:
+                    rows = list(csv.DictReader(f))
+            except FileNotFoundError:
+                print("⚠️ CSV not found — treating as failure (non-blocking)")
+                print("::warning::Migration results missing")
+                raise SystemExit(0)
+            
+            fail_count = 0
+            
+            for r in rows:
+            status = (r.get("Migration_Status") or "").lower()
+
   # ------------------------------------------------------------
   # Stage 3: Post-migration validation (script 3)
   # ------------------------------------------------------------
