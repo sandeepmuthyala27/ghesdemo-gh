@@ -242,23 +242,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
   
-      - name: Install prerequisites (GitHub-hosted only)
+      - name: Install prerequisites
         if: ${{ inputs.runner == 'ubuntu-latest' }}
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh python3
   
       - name: Install GEI extension
-        shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$GH_TARGET_HOST" ]]; then
-              echo "$GH_PAT" | gh auth login --with-token
-          else
-              echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
-          fi
+          echo "$GH_PAT" | gh auth login --with-token
           gh extension install https://github.com/github/gh-gei || true
   
       - name: Make scripts executable
@@ -269,7 +263,7 @@ jobs:
           set -euo pipefail
           cp "${{ inputs.csv_path }}" scripts/repos.csv
   
-      # ✅ MAIN MIGRATION (no early failure)
+      # ✅ RUN ALL REPOS (NO EARLY FAILURE)
       - name: Run migration (parallel)
         run: |
           set -euo pipefail
@@ -279,8 +273,8 @@ jobs:
             --output repo_migration_output.csv \
             | tee migration.log
   
-      # ✅ LOG CAPTURE
-      - name: Capture Octoshift logs
+      # ✅ CAPTURE LOGS
+      - name: Capture logs
         if: always()
         run: |
           set -euo pipefail
@@ -292,8 +286,8 @@ jobs:
   
           tar -czf octoshift-logs.tgz octoshift-logs
   
-      # ✅ SUMMARY (with partial success)
-      - name: Publish migration summary
+      # ✅ SUMMARY
+      - name: Publish summary
         if: always()
         run: |
           python3 - <<'PY'
@@ -305,44 +299,39 @@ jobs:
   
           def w(line=""):
             if summary.exists():
-              summary.write_text(summary.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
+              summary.write_text(summary.read_text() + line + "\n")
             else:
-              summary.write_text(line + "\n", encoding="utf-8")
+              summary.write_text(line + "\n")
   
-          w("## 🚀 Migration Summary (GHES → GitHub)")
-          w("")
+          w("## 🚀 Migration Summary")
   
           if not out.exists():
-            w("❌ No output file found")
+            w("❌ Output file missing")
             raise SystemExit(0)
   
-          rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
+          rows = list(csv.DictReader(out.open()))
+          success = sum(1 for r in rows if r["Migration_Status"].lower().startswith("success"))
+          failure = sum(1 for r in rows if r["Migration_Status"].lower().startswith("failure"))
   
-          success = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("success"))
-          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("failure"))
-  
-          w(f"- ✅ Success: **{success}**")
-          w(f"- ❌ Failure: **{failure}**")
-          w("")
+          w(f"- ✅ Success: {success}")
+          w(f"- ❌ Failure: {failure}")
   
           if failure > 0:
-            w("### ⚠️ Partial Success")
-            w("> Some repositories failed during migration.")
-            w("> Please review logs and artifacts.")
-  
-          w("")
-          w("### 📁 Artifacts")
-          w("- migration.log")
-          w("- repo_migration_output.csv")
-          w("- octoshift-logs.tgz")
+            w("")
+            w("### ⚠️ Some repositories failed")
           PY
   
-      # ✅ ✅ AMBER SIMULATION (no failure, but warning)
-      - name: Mark partial success (warning)
+      # ✅ ✅ FINAL FAIL CONTROL (THIS IS KEY)
+      - name: Fail job if any repo failed
         if: always()
         shell: bash
         run: |
           set -euo pipefail
+  
+          if [[ ! -f repo_migration_output.csv ]]; then
+            echo "❌ Missing output CSV"
+            exit 1
+          fi
   
           FAIL_COUNT=$(awk -F',' '
           NR==1 {
@@ -354,14 +343,17 @@ jobs:
           END {print count+0}
           ' repo_migration_output.csv)
   
+          echo "❌ Failed repos: $FAIL_COUNT"
+  
           if [[ "$FAIL_COUNT" -gt 0 ]]; then
-            echo "::warning::⚠️ Partial success - $FAIL_COUNT repository migration(s) failed"
+            echo "❌ Marking job FAILED because at least one repo failed"
+            exit 1
           else
-            echo "✅ All repositories migrated successfully"
+            echo "✅ All migrations successful"
           fi
   
-      # ✅ ARTIFACTS
-      - name: Upload migration artifacts
+      # ✅ ARTIFACTS (still uploaded)
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -372,7 +364,6 @@ jobs:
             migration-*.txt
             octoshift-logs.tgz
           if-no-files-found: warn
-
   # ------------------------------------------------------------
   # Stage 3: Post-migration validation (script 3)
   # ------------------------------------------------------------
