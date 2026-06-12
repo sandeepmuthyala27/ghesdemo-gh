@@ -281,7 +281,7 @@ jobs:
         run: |
           GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
-          ./scripts/3_migration.sh \
+          ./scripts/2_migration.sh \
             --max-concurrent "${{ inputs.max_concurrent }}" \
             --csv "scripts/repos.csv" \
             --output repo_migration_output.csv \
@@ -423,7 +423,7 @@ jobs:
               echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
           fi
           set -euo pipefail
-          ./scripts/4_post-migration-validation.sh | tee post_validation.log
+          ./scripts/3_post_migration_validation.sh | tee post_validation.log
 
       - name: Publish post-validation repo-wise summary (branch/commit/SHA)
         if: always()
@@ -603,7 +603,7 @@ jobs:
           GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
           export CSV_FILE="scripts/repos.csv"
-          ./scripts/5_ghes-ghec-var-mig.sh 2>&1 | tee vars_migration.log
+          ./scripts/4_ghes_ghec_var_mig.sh 2>&1 | tee vars_migration.log
 
       - name: Publish Stage 4 vars migration summary
         if: always()
