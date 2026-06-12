@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/2_migration-readiness.sh | tee precheck.log
+          ./scripts/1_migration-readiness.sh | tee precheck.log
 
       - name: Publish pre-validation consolidated summary (same lines as script)
         if: always()
