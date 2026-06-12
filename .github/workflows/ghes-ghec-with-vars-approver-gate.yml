@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/1_migration-readiness.sh | tee precheck.log
+          ./scripts/2_migration-readiness.sh | tee precheck.log
 
       - name: Publish pre-validation consolidated summary (same lines as script)
         if: always()
@@ -233,119 +233,147 @@ jobs:
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 360
     needs: [pre-migration-validation]
-    if: ${{ inputs.run_migration == 'true'
+    if: ${{ always()
+      && inputs.run_migration == 'true'
       && (needs.pre-migration-validation.result == 'success'
           || needs.pre-migration-validation.result == 'skipped') }}
-  
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-  
-      - name: Install prerequisites
+
+      - name: Install prerequisites (GitHub-hosted only)
         if: ${{ inputs.runner == 'ubuntu-latest' }}
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh python3
-  
-      - name: Install GEI extension
+          gh --version
+          jq --version
+          python3 --version
+
+      - name: Install/Update GEI extension
+        shell: bash
         run: |
           set -euo pipefail
           if [[ -z "$GH_TARGET_HOST" ]]; then
-            echo "$GH_PAT" | gh auth login --with-token
+              echo "$GH_PAT" | gh auth login --with-token
           else
-            echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
+              echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
           fi
-          gh extension install https://github.com/github/gh-gei || true
-  
+          gh extension install https://github.com/github/gh-gei
+          # gh extension upgrade https://github.com/github/gh-gei
+          gh gei --help >/dev/null
+
       - name: Make scripts executable
+        shell: bash
         run: chmod +x scripts/*.sh
-  
-      - name: Prepare CSV
+
+      - name: Prepare CSV for scripts
+        shell: bash
         run: |
           set -euo pipefail
           cp "${{ inputs.csv_path }}" scripts/repos.csv
-  
-      # ✅ MAIN MIGRATION (runs all repos, no early exit expected)
+          echo "✅ CSV copied: ${{ inputs.csv_path }} → scripts/repos.csv"
+
       - name: Run migration (parallel)
+        shell: bash
         run: |
+          GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
-          ./scripts/2_migration.sh \
+          ./scripts/3_migration.sh \
             --max-concurrent "${{ inputs.max_concurrent }}" \
             --csv "scripts/repos.csv" \
             --output repo_migration_output.csv \
             | tee migration.log
-  
-      # ✅ LOG CAPTURE (always runs)
-      - name: Capture logs
+
+      - name: Capture Octoshift (gh gei) logs into tar
         if: always()
+        shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p octoshift-logs
+
+          # Capture ONLY the files you showed (octoshift logs created in execution dir)
           cp -v *.octoshift*.log octoshift-logs/ 2>/dev/null || true
+
+          # (Optional but useful) include your workflow logs too
           cp -v migration.log repo_migration_output.csv octoshift-logs/ 2>/dev/null || true
           cp -v migration-*.txt octoshift-logs/ 2>/dev/null || true
+
+          # Create tar.gz
           tar -czf octoshift-logs.tgz octoshift-logs
-  
-      # ✅ SUMMARY WITH PARTIAL SUCCESS
-      - name: Publish summary
+
+          echo "## 📦 Octoshift logs captured" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Included: \`*.octoshift*.log\` (plus migration outputs if present)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact: \`octoshift-logs.tgz\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish migration summary (repo-wise + migrated links)
         if: always()
+        shell: bash
         run: |
           python3 - <<'PY'
           import csv, os
           from pathlib import Path
-  
           out = Path("repo_migration_output.csv")
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-  
+
           def w(line=""):
-              if summary.exists():
-                  summary.write_text(summary.read_text() + line + "\n")
-              else:
-                  summary.write_text(line + "\n")
-  
+            if summary.exists():
+              summary.write_text(summary.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
+            else:
+              summary.write_text(line + "\n", encoding="utf-8")
+
           w("## 🚀 Migration Summary (GHES → GitHub)")
           w("")
-  
+          w(f"- **Concurrency:** `${{ inputs.max_concurrent }}`")
+          w("")
+
           if not out.exists():
-              w("❌ Output file missing")
-              raise SystemExit(0)
-  
-          rows = list(csv.DictReader(out.open()))
-  
+            w("> [!CAUTION]")
+            w("> `repo_migration_output.csv` not found. Check `migration.log`.")
+            raise SystemExit(0)
+
+          rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
           success = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("success"))
-          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith(("fail","error")))
-  
+          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("failure"))
+
+          w("### 📊 Totals")
           w(f"- ✅ Success: **{success}**")
           w(f"- ❌ Failure: **{failure}**")
-  
-          if failure > 0:
-              w("")
-              w("### ⚠️ Partial Success")
-              w("> Some repositories failed during migration, but pipeline continued.")
+          w("")
+          w("### 📌 Per-repo status & migrated links")
+          w("| Source (GHES) | Status | Target (GitHub) |")
+          w("|---|---|---|")
+
+          for r in rows:
+            src = f"{(r.get('ghes_org') or '').strip()}/{(r.get('ghes_repo') or '').strip()}"
+            status = (r.get("Migration_Status") or "").strip()
+            gh_org = (r.get("github_org") or "").strip()
+            gh_repo = (r.get("github_repo") or "").strip()
+            if status.lower().startswith("success") and gh_org and gh_repo:
+              link = f"https://github.com/{gh_org}/{gh_repo}"
+              w(f"| `{src}` | ✅ Success | {link} |")
+            else:
+              w(f"| `{src}` | ❌ {status or 'Unknown'} | - |")
+
+          w("")
+          w("### 📁 Artifacts")
+          w("- `repo_migration_output.csv`, `migration.log`, `migration-*.txt`")
           PY
-  
-      # ✅ ✅ PARTIAL SUCCESS LOGIC (NO FAILURE)
-      - name: Detect partial success (do NOT fail job)
+
+      - name: Upload migration artifacts
         if: always()
-        run: |
-          set -euo pipefail
-  
-          python3 - <<'PY'
-            import csv
-            
-            try:
-                with open("repo_migration_output.csv", newline="", encoding="utf-8") as f:
-                    rows = list(csv.DictReader(f))
-            except FileNotFoundError:
-                print("⚠️ CSV not found — treating as failure (non-blocking)")
-                print("::warning::Migration results missing")
-                raise SystemExit(0)
-            
-            fail_count = 0
-            
-            for r in rows:
-            status = (r.get("Migration_Status") or "").lower()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage2-migration-${{ github.run_id }}
+          path: |
+            migration.log
+            repo_migration_output.csv
+            migration-*.txt
+            octoshift-logs.tgz
+          if-no-files-found: warn
 
   # ------------------------------------------------------------
   # Stage 3: Post-migration validation (script 3)
@@ -354,7 +382,7 @@ jobs:
     name: Stage 3 - Post-migration validation
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 180
-    #needs: [migration]
+    needs: [migration]
     if: ${{ always()
       && inputs.run_post_validation == 'true'
       && (needs.migration.result == 'success'
@@ -395,7 +423,7 @@ jobs:
               echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
           fi
           set -euo pipefail
-          ./scripts/3_post_migration_validation.sh | tee post_validation.log
+          ./scripts/4_post-migration-validation.sh | tee post_validation.log
 
       - name: Publish post-validation repo-wise summary (branch/commit/SHA)
         if: always()
@@ -575,7 +603,7 @@ jobs:
           GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
           export CSV_FILE="scripts/repos.csv"
-          ./scripts/4_ghes_ghec_var_mig.sh 2>&1 | tee vars_migration.log
+          ./scripts/5_ghes-ghec-var-mig.sh 2>&1 | tee vars_migration.log
 
       - name: Publish Stage 4 vars migration summary
         if: always()
