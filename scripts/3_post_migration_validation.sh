@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -77,7 +76,7 @@ get_github_branches_json() {
 }
 
 # ----------------------------
-# Commit fetch (info only)
+# Commit fetch
 # ----------------------------
 get_commit_count_and_latest() {
   local mode="$1" org="$2" repo="$3" branch="$4"
@@ -141,18 +140,14 @@ validate_migration() {
   for b in "${gh_array[@]}"; do gh_map["$b"]=1; done
   for b in "${ghes_array[@]}"; do ghes_map["$b"]=1; done
 
-  # ----------------------------
   # Branch count
-  # ----------------------------
   if [[ ${#ghes_array[@]} -eq ${#gh_array[@]} ]]; then
     write_log "✅ Branch Count MATCHED | GHES=${#ghes_array[@]} GitHub=${#gh_array[@]}"
   else
     write_log "❌ Branch Count NOT MATCHED | GHES=${#ghes_array[@]} GitHub=${#gh_array[@]}"
   fi
 
-  # ----------------------------
-  # Missing / extra branches (SAFE)
-  # ----------------------------
+  # Missing / extra
   local missing_in_github=()
   local missing_in_ghes=()
 
@@ -164,21 +159,15 @@ validate_migration() {
     [[ -z "${ghes_map[$b]:-}" ]] && missing_in_ghes+=("$b")
   done
 
-  if [[ ${#missing_in_github[@]} -gt 0 ]]; then
-    write_log "⚠️ Missing in GitHub (${#missing_in_github[@]}): ${missing_in_github[*]}"
-  else
+  [[ ${#missing_in_github[@]} -gt 0 ]] && \
+    write_log "⚠️ Missing in GitHub (${#missing_in_github[@]}): ${missing_in_github[*]}" || \
     write_log "✅ No branches missing in GitHub"
-  fi
 
-  if [[ ${#missing_in_ghes[@]} -gt 0 ]]; then
-    write_log "⚠️ Extra in GitHub (${#missing_in_ghes[@]}): ${missing_in_ghes[*]}"
-  else
+  [[ ${#missing_in_ghes[@]} -gt 0 ]] && \
+    write_log "⚠️ Extra in GitHub (${#missing_in_ghes[@]}): ${missing_in_ghes[*]}" || \
     write_log "✅ No extra branches in GitHub"
-  fi
 
-  # ----------------------------
-  # Select 10 branches only
-  # ----------------------------
+  # ✅ SELECT ONLY 10 BRANCHES
   local selected_branches=()
   local count=0
 
@@ -191,17 +180,19 @@ validate_migration() {
 
   write_log "ℹ️ Deep validation on ${#selected_branches[@]} branches"
 
-  # ----------------------------
-  # Commit validation (sample)
-  # ----------------------------
-  local branch
+  # ✅ SAFE COMMIT VALIDATION
+  set +e
 
   for branch in "${selected_branches[@]}"; do
-    IFS="|" read -r gh_count gh_sha <<< \
-      "$(get_commit_count_and_latest github "$github_org" "$github_repo" "$branch")"
 
-    IFS="|" read -r ghes_count ghes_sha <<< \
-      "$(get_commit_count_and_latest ghes "$ghes_org" "$ghes_repo" "$branch")"
+    gh_result="$(get_commit_count_and_latest github "$github_org" "$github_repo" "$branch" || echo "0|")"
+    ghes_result="$(get_commit_count_and_latest ghes "$ghes_org" "$ghes_repo" "$branch" || echo "0|")"
+
+    IFS="|" read -r gh_count gh_sha <<< "$gh_result"
+    IFS="|" read -r ghes_count ghes_sha <<< "$ghes_result"
+
+    gh_count="${gh_count:-0}"
+    ghes_count="${ghes_count:-0}"
 
     write_log "ℹ️ Branch: $branch | Counts GHES=$ghes_count GitHub=$gh_count"
 
@@ -210,13 +201,16 @@ validate_migration() {
     else
       write_log "❌ Branch: $branch | SHA MISMATCH | GHES=$ghes_sha GitHub=$gh_sha"
     fi
+
   done
+
+  set -e
 
   write_log "✅ Validation completed for: ${github_org}/${github_repo}"
 }
 
 # ----------------------------
-# CSV loop (FIXED)
+# CSV loop
 # ----------------------------
 validate_from_csv() {
   local csv="repos.csv"
@@ -231,10 +225,8 @@ validate_from_csv() {
   done < <(tail -n +2 "$csv")
 }
 
-# ----------------------------
 # Run
-# ----------------------------
 validate_from_csv
 
-# ✅ Always exit success (no false failures)
+# ✅ Always exit success
 exit 0
