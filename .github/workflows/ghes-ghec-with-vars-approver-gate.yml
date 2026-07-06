@@ -110,9 +110,7 @@ jobs:
             cat /tmp/ghec_resp.json || true
             exit 0
           fi
-      
-          echo "✅ GH_PAT validation successful."
-          
+                          
           echo "=================================================="
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
           echo "=================================================="
@@ -128,7 +126,7 @@ jobs:
             exit 1
           fi
       
-          echo "✅ GH_SOURCE_PAT validation successful."
+          echo "✅ GH_PAT & GH_SOURCE_PAT validation successful."
                 
       - name: Install/Update GEI extension
         shell: bash
