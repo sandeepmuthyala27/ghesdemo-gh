@@ -1,0 +1,159 @@
+name: Setup Customer Environment
+on:
+  create:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  setup-environment:
+    if: |
+      github.event.ref_type == 'branch' &&
+      !startsWith(github.event.ref, 'feature/') &&
+      !startsWith(github.event.ref, 'bugfix/') &&
+      !startsWith(github.event.ref, 'hotfix/')
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Step 1/5 Generate Environment Name
+        id: env-name
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          ENV_NAME="${{ github.event.ref }}"
+          echo "env_name=$ENV_NAME" >> "$GITHUB_OUTPUT"
+          echo "Environment Bootstrap Triggered"
+          echo "Branch: $ENV_NAME"
+          echo "Environment: $ENV_NAME"
+                echo "env_name=$ENV_NAME" >> "$GITHUB_OUTPUT"
+                echo ""
+                echo "Environment Configuration"
+                echo "------------------------"
+                echo "Environment Name : $ENV_NAME"
+
+      - name: Step 2/5 - Create GitHub Environment
+        env:
+          ENV_NAME: ${{ steps.env-name.outputs.env_name }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          echo "Creating environment: $ENV_NAME"
+          gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${{ github.repository }}/environments/$ENV_NAME" \
+            --input - <<EOF
+          {
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          }
+          EOF
+          echo "Environment created successfully"
+ 
+      - name: Step 3/5 - Configure Branch Policy
+        env:
+          ENV_NAME: ${{ steps.env-name.outputs.env_name }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          EXISTING_POLICY=$(
+            gh api \
+              "repos/${{ github.repository }}/environments/$ENV_NAME/deployment-branch-policies" \
+              2>/dev/null |
+            jq -r --arg BRANCH "$ENV_NAME" '
+              .branch_policies[]? |
+              select(.name==$BRANCH) |
+              .name
+            '
+          )
+          if [[ "$EXISTING_POLICY" == "$ENV_NAME" ]]; then
+            echo "Branch policy already exists"
+          else
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${{ github.repository }}/environments/$ENV_NAME/deployment-branch-policies" \
+              -f name="$ENV_NAME" \
+              -f type=branch
+            echo "Branch policy created"
+          fi
+
+      - name: Step 4/5 - Create Environment Variables
+        env:
+          ENV_NAME: ${{ steps.env-name.outputs.env_name }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          VARIABLES=(
+            "GHES_API_URL"
+            "GH_TARGET_HOST"
+          )
+          EXISTING=$(gh variable list \
+            --env "$ENV_NAME" \
+            --repo "${{ github.repository }}" \
+            2>/dev/null || true)
+          for VAR in "${VARIABLES[@]}"; do
+            if echo "$EXISTING" | grep -q "^$VAR"; then
+              echo "Variable exists: $VAR"
+              continue
+            fi
+ 
+            gh variable set "$VAR" \
+              --env "$ENV_NAME" \
+              --repo "${{ github.repository }}" \
+              --body "__SET_ME__"
+            echo "Created variable: $VAR"
+          done
+ 
+      - name: Step 5/5 - Create Environment Secrets
+        env:
+          ENV_NAME: ${{ steps.env-name.outputs.env_name }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          SECRETS=(
+            "GH_SOURCE_PAT"
+            "GH_PAT"
+          )
+          EXISTING=$(gh secret list \
+            --env "$ENV_NAME" \
+            --repo "${{ github.repository }}" \
+            2>/dev/null || true)
+          for SECRET in "${SECRETS[@]}"; do
+            if echo "$EXISTING" | grep -q "^$SECRET"; then
+              echo "Secret exists: $SECRET"
+              continue
+            fi
+            echo "__SET_ME__" | gh secret set "$SECRET" \
+              --env "$ENV_NAME" \
+              --repo "${{ github.repository }}"
+            echo "Created secret: $SECRET"
+          done
+ 
+      - name: Summary
+        env:
+          ENV_NAME: ${{ steps.env-name.outputs.env_name }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo ""
+          echo "================================="
+          echo "Environment Setup Complete"
+          echo "================================="
+          echo "Environment : $ENV_NAME"
+          echo "Allowed Branch : $ENV_NAME"
+          echo ""
+          echo "Next Steps:"
+          echo "1. Populate Variables"
+          echo "2. Populate Secrets"
+          echo "3. Test Migration Workflow"
+          echo ""
+
+          echo "Migration Workflow remains unchanged."
+ 
