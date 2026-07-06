@@ -106,15 +106,13 @@ jobs:
             https://api.github.com/user)
       
           if [[ "$GHEC_STATUS" != "200" ]]; then
-            echo "❌ GH_PAT is invalid, expired, or lacks required permissions."
+            echo "❌ GH_PAT validation failed."
             cat /tmp/ghec_resp.json || true
+            exit 1
           fi
       
-          GHEC_USER=$(jq -r '.login // "unknown"' /tmp/ghec_resp.json)
-          echo "✅ GH_PAT valid"
-          echo "Authenticated User: ${GHEC_USER}"
+          echo "✅ GH_PAT validation successful."
       
-          echo ""
           echo "=================================================="
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
           echo "=================================================="
@@ -125,17 +123,14 @@ jobs:
             "${GHES_API_URL}/user")
       
           if [[ "$GHES_STATUS" != "200" ]]; then
-            echo "❌ GH_SOURCE_PAT is invalid, expired, or lacks required permissions."
+            echo "❌ GH_SOURCE_PAT validation failed."
             cat /tmp/ghes_resp.json || true
             exit 1
           fi
       
-          GHES_USER=$(jq -r '.login // "unknown"' /tmp/ghes_resp.json)
-          echo "✅ GH_SOURCE_PAT valid"
-          echo "Authenticated User: ${GHES_USER}"
-      
-          echo ""
-          echo "✅ PAT validation completed successfully."
+          echo "✅ GH_SOURCE_PAT validation successful."
+          echo "✅ All PAT validations passed."
+
       
       - name: Install/Update GEI extension
         shell: bash
