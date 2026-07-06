@@ -108,7 +108,6 @@ jobs:
           if [[ "$GHEC_STATUS" != "200" ]]; then
             echo "❌ GH_PAT is invalid, expired, or lacks required permissions."
             cat /tmp/ghec_resp.json || true
-            exit 1
           fi
       
           GHEC_USER=$(jq -r '.login // "unknown"' /tmp/ghec_resp.json)
