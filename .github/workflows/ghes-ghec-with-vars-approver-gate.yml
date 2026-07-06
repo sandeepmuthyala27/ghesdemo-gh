@@ -108,7 +108,7 @@ jobs:
           if [[ "$GHEC_STATUS" != "200" ]]; then
             echo "❌ GH_PAT validation failed."
             cat /tmp/ghec_resp.json || true
-            exit 0
+            exit 1
           fi
                           
           echo "=================================================="
