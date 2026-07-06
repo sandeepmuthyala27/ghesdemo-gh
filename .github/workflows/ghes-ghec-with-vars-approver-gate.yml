@@ -110,6 +110,9 @@ jobs:
             cat /tmp/ghec_resp.json || true
             exit 1
           fi
+          GHEC_USER=$(jq -r '.login // "unknown"' /tmp/ghec_resp.json)
+          echo "✅ GH_PAT valid"
+          echo "Authenticated User: ${GHEC_USER}"
                           
           echo "=================================================="
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
@@ -125,6 +128,9 @@ jobs:
             cat /tmp/ghes_resp.json || true
             exit 1
           fi
+          GHES_USER=$(jq -r '.login // "unknown"' /tmp/ghes_resp.json)
+          echo "✅ GH_SOURCE_PAT valid"
+          echo "Authenticated User: ${GHES_USER}"
       
           echo "✅ GH_PAT & GH_SOURCE_PAT validation successful."
                 
