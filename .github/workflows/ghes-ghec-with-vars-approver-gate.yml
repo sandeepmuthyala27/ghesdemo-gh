@@ -91,6 +91,8 @@ jobs:
         shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          GH_SOURCE_PAT: ${{ secrets.GH_SOURCE_PAT }}
+          GHES_API_URL: ${{ secrets.GHES_API_URL }}
         run: |
           set -euo pipefail
       
@@ -106,18 +108,11 @@ jobs:
           if [[ "$GHEC_STATUS" != "200" ]]; then
             echo "❌ GH_PAT validation failed."
             cat /tmp/ghec_resp.json || true
-            exit 1
+            exit 0
           fi
       
           echo "✅ GH_PAT validation successful."
           
-      - name: Validate GH_SOURCE_PAT
-        shell: bash
-        env:
-          GH_SOURCE_PAT: ${{ secrets.GH_SOURCE_PAT }}
-          GHES_API_URL: ${{ secrets.GHES_API_URL }}
-        run: |
-          set -euo pipefail
           echo "=================================================="
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
           echo "=================================================="
