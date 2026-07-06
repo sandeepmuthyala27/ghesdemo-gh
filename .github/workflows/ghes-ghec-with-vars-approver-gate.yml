@@ -91,8 +91,6 @@ jobs:
         shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          GH_SOURCE_PAT: ${{ secrets.GH_SOURCE_PAT }}
-          GHES_API_URL: ${{ secrets.GHES_API_URL }}
         run: |
           set -euo pipefail
       
@@ -112,7 +110,14 @@ jobs:
           fi
       
           echo "✅ GH_PAT validation successful."
-      
+          
+      - name: Validate GH_SOURCE_PAT
+        shell: bash
+        env:
+          GH_SOURCE_PAT: ${{ secrets.GH_SOURCE_PAT }}
+          GHES_API_URL: ${{ secrets.GHES_API_URL }}
+        run: |
+          set -euo pipefail
           echo "=================================================="
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
           echo "=================================================="
@@ -129,9 +134,7 @@ jobs:
           fi
       
           echo "✅ GH_SOURCE_PAT validation successful."
-          echo "✅ All PAT validations passed."
-
-      
+                
       - name: Install/Update GEI extension
         shell: bash
         run: |
