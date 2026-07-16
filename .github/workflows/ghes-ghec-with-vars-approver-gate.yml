@@ -168,6 +168,7 @@ jobs:
           fi
       
           echo "✅ GH_PAT & GH_SOURCE_PAT validation successful."
+          
       - name: Install/Update GEI extension
         if: steps.validate_pats.outputs.gh_pat_valid == 'true' && steps.validate_pats.outputs.gh_source_pat_valid == 'true'
         shell: bash
