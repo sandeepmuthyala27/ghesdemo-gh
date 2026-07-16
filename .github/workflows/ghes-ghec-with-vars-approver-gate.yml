@@ -87,7 +87,7 @@ jobs:
           gh --version
           jq --version
           python3 --version
-      - name: Validate GH_PAT and GH_SOURCE_PAT
+      - name: Validate GH_PAT & GH_SOURCE_PAT
         id: validate_pats
         shell: bash
         env:
@@ -100,22 +100,27 @@ jobs:
           GHEC_OK=false
           GHES_OK=false
       
+          GHEC_USER="N/A"
+          GHES_USER="N/A"
+      
           echo "=================================================="
           echo "Validating GHEC PAT (GH_PAT)"
           echo "=================================================="
       
-          GHEC_STATUS=$(curl -s -o /tmp/ghec_resp.json -w "%{http_code}" \
+          GHEC_STATUS=$(curl -s \
+            -o /tmp/ghec_resp.json \
+            -w "%{http_code}" \
             -H "Authorization: token ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user")
+            https://api.github.com/user)
       
-          if [[ "$GHEC_STATUS" == "200" ]]; then
+          if [[ "${GHEC_STATUS}" == "200" ]]; then
             GHEC_USER=$(jq -r '.login // "unknown"' /tmp/ghec_resp.json)
             echo "✅ GH_PAT valid"
             echo "Authenticated User: ${GHEC_USER}"
             GHEC_OK=true
           else
-            echo "❌ GH_PAT validation failed."
+            echo "❌ GH_PAT validation failed"
             cat /tmp/ghec_resp.json || true
           fi
       
@@ -124,37 +129,45 @@ jobs:
           echo "Validating GHES PAT (GH_SOURCE_PAT)"
           echo "=================================================="
       
-          GHES_STATUS=$(curl -sk -o /tmp/ghes_resp.json -w "%{http_code}" \
+          GHES_STATUS=$(curl -sk \
+            -o /tmp/ghes_resp.json \
+            -w "%{http_code}" \
             -H "Authorization: token ${GH_SOURCE_PAT}" \
             -H "Accept: application/vnd.github+json" \
             "${GHES_API_URL}/user")
       
-          if [[ "$GHES_STATUS" == "200" ]]; then
+          if [[ "${GHES_STATUS}" == "200" ]]; then
             GHES_USER=$(jq -r '.login // "unknown"' /tmp/ghes_resp.json)
             echo "✅ GH_SOURCE_PAT valid"
             echo "Authenticated User: ${GHES_USER}"
             GHES_OK=true
           else
-            echo "❌ GH_SOURCE_PAT validation failed."
+            echo "❌ GH_SOURCE_PAT validation failed"
             cat /tmp/ghes_resp.json || true
           fi
       
           echo "gh_pat_valid=${GHEC_OK}" >> "$GITHUB_OUTPUT"
           echo "gh_source_pat_valid=${GHES_OK}" >> "$GITHUB_OUTPUT"
       
+          echo "gh_pat_user=${GHEC_USER}" >> "$GITHUB_OUTPUT"
+          echo "gh_source_pat_user=${GHES_USER}" >> "$GITHUB_OUTPUT"
+      
           echo ""
           echo "=================================================="
           echo "Validation Summary"
           echo "=================================================="
-          echo "GH_PAT Valid        : ${GHEC_OK}"
-          echo "GH_SOURCE_PAT Valid : ${GHES_OK}"
+          echo "GH_PAT Valid          : ${GHEC_OK}"
+          echo "GH_PAT User           : ${GHEC_USER}"
+          echo "GH_SOURCE_PAT Valid   : ${GHES_OK}"
+          echo "GH_SOURCE_PAT User    : ${GHES_USER}"
+          echo "=================================================="
       
           if [[ "${GHEC_OK}" != "true" || "${GHES_OK}" != "true" ]]; then
             echo "❌ One or more PAT validations failed."
             exit 1
           fi
+      
           echo "✅ GH_PAT & GH_SOURCE_PAT validation successful."
-
       - name: Install/Update GEI extension
         if: steps.validate_pats.outputs.gh_pat_valid == 'true' && steps.validate_pats.outputs.gh_source_pat_valid == 'true'
         shell: bash
