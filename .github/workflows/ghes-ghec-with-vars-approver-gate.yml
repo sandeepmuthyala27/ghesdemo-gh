@@ -468,7 +468,9 @@ jobs:
     name: Stage 3 - Post-migration validation
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 180
-    needs: [migration]
+    needs: 
+      - pre-migration-validation
+      - migration
     if: ${{ always()
       && inputs.run_post_validation == 'true'
       && (needs.migration.result == 'success'
