@@ -909,7 +909,7 @@ jobs:
 
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ghec-to-ghec-emu-org-${{ github.run_id }}
           path: emu-org-logs/
