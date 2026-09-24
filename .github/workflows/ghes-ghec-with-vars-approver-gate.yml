@@ -69,13 +69,13 @@ on:
         options: ["true", "false"]
 
       ghec_source_org:
-        description: "EMU path - source GHEC organization login"
+        description: "EMU path - source GHEC organization"
         required: false
         default: ""
         type: string
 
       emu_target_org:
-        description: "EMU path - NEW target organization login"
+        description: "EMU path - NEW target organization"
         required: false
         default: ""
         type: string
@@ -92,13 +92,7 @@ on:
         default: ""
         type: string
 
-      emu_run_type:
-        description: "Classification for the EMU run; a trial still requires a unique disposable target org"
-        required: false
-        default: "trial"
-        type: choice
-        options: ["trial", "production"]
-
+      
 permissions:
   contents: read
   actions: write
