@@ -3,56 +3,101 @@ name: ghes-ghec-with-vars-approver-gate
 on:
   workflow_dispatch:
     inputs:
+      migration_path:
+        description: "Select the migration path"
+        required: true
+        default: "ghes-to-ghec"
+        type: choice
+        options:
+          - ghes-to-ghec
+          - ghec-to-ghec-emu
+
       runner:
         description: >
-          Runner selector. Use ubuntu-latest for GitHub-hosted.
-          For self-hosted, provide JSON array of runner LABELS,
-          e.g. ["self-hosted","linux","x64","ghes-migration"].
+          Runner selector. Use ubuntu-latest for GitHub-hosted. For self-hosted,
+          provide a JSON array, for example ["self-hosted","linux","x64","migration"].
         required: true
         default: "ubuntu-latest"
+        type: string
 
       csv_path:
-        description: "Path to repos.csv (repo root or scripts/)"
+        description: "Path to repos.csv for the GHES-to-GHEC path"
         required: true
         default: "repos.csv"
         type: string
 
       max_concurrent:
-        description: "Maximum concurrent migrations (1-5)"
+        description: "Maximum concurrent repository migrations (1-5)"
         required: false
         default: "5"
         type: choice
-        options: ["1","2","3","4","5"]
+        options: ["1", "2", "3", "4", "5"]
 
-      # Stage toggles
       run_pre_validation:
-        description: "Run Stage 1: pre-migration validation"
+        description: "GHES path - run Stage 1 pre-migration validation"
         required: true
         default: "true"
         type: choice
-        options: ["true","false"]
+        options: ["true", "false"]
 
       run_migration:
-        description: "Run Stage 2: migration"
+        description: "GHES path - run Stage 2 repository migration"
         required: true
         default: "true"
         type: choice
-        options: ["true","false"]
+        options: ["true", "false"]
 
       run_post_validation:
-        description: "Run Stage 3: post-migration validation"
+        description: "GHES path - run Stage 3 post-migration validation"
         required: true
         default: "true"
         type: choice
-        options: ["true","false"]
+        options: ["true", "false"]
 
-      # ✅ Stage 4 toggle (vars migration)
       run_vars_migration:
-        description: "Run Stage 4: migrate org/repo/env variables (GHES → GHEC)"
+        description: "GHES path - run Stage 4 org/repo/environment variables migration"
         required: true
         default: "true"
         type: choice
-        options: ["true","false"]
+        options: ["true", "false"]
+
+      run_emu_org_migration:
+        description: "EMU path - run GHEC-to-GHEC EMU organization migration"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+      ghec_source_org:
+        description: "EMU path - source GHEC organization login"
+        required: false
+        default: ""
+        type: string
+
+      emu_target_org:
+        description: "EMU path - NEW target organization login"
+        required: false
+        default: ""
+        type: string
+
+      emu_target_enterprise:
+        description: "EMU path - destination EMU enterprise slug"
+        required: false
+        default: ""
+        type: string
+
+      emu_target_api_url:
+        description: "EMU path - base API URL for GHE.com only; leave blank for github.com"
+        required: false
+        default: ""
+        type: string
+
+      emu_run_type:
+        description: "Classification for the EMU run; a trial still requires a unique disposable target org"
+        required: false
+        default: "trial"
+        type: choice
+        options: ["trial", "production"]
 
 permissions:
   contents: read
@@ -65,12 +110,9 @@ env:
   GH_TARGET_HOST: ${{ secrets.GH_TARGET_HOST }}
 
 jobs:
-  # ------------------------------------------------------------
-  # Stage 1: Pre-migration validation (script 1)
-  # ------------------------------------------------------------
   pre-migration-validation:
     name: Stage 1 - Pre-migration validation
-    if: ${{ inputs.run_pre_validation == 'true' }}
+    if: ${{ inputs.migration_path == 'ghes-to-ghec' && inputs.run_pre_validation == 'true' }}
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 60
     steps:
@@ -83,109 +125,71 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq gh python3
+          sudo apt-get install -y jq gh python3 curl
           gh --version
           jq --version
           python3 --version
-      - name: Validate GH_PAT & GH_SOURCE_PAT
+
+      - name: Validate GH_PAT and GH_SOURCE_PAT
         id: validate_pats
         shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GH_SOURCE_PAT: ${{ secrets.GH_SOURCE_PAT }}
-          GHES_API_URL: ${{ secrets.GHES_API_URL }}
         run: |
           set -uo pipefail
-      
+          : "${GH_PAT:?GH_PAT secret is required}"
+          : "${GH_SOURCE_PAT:?GH_SOURCE_PAT secret is required}"
+          : "${GHES_API_URL:?GHES_API_URL secret is required}"
+
           GHEC_OK=false
           GHES_OK=false
-      
           GHEC_USER="N/A"
           GHES_USER="N/A"
-      
-          echo "=================================================="
-          echo "Validating GHEC PAT (GH_PAT)"
-          echo "=================================================="
-      
-          GHEC_STATUS=$(curl -s \
-            -o /tmp/ghec_resp.json \
-            -w "%{http_code}" \
-            -H "Authorization: token ${GH_PAT}" \
+
+          GHEC_STATUS=$(curl -sS -o /tmp/ghec_resp.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/user)
-      
-          if [[ "${GHEC_STATUS}" == "200" ]]; then
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/user")
+
+          if [[ "$GHEC_STATUS" == "200" ]]; then
             GHEC_USER=$(jq -r '.login // "unknown"' /tmp/ghec_resp.json)
-            echo "✅ GH_PAT valid"
-            echo "Authenticated User: ${GHEC_USER}"
             GHEC_OK=true
+            echo "GHEC PAT valid for ${GHEC_USER}"
           else
-            echo "❌ GH_PAT validation failed"
-            cat /tmp/ghec_resp.json || true
+            echo "::error::GH_PAT validation failed with HTTP ${GHEC_STATUS}"
+            jq -r '.message // "Unknown API error"' /tmp/ghec_resp.json || true
           fi
-      
-          echo ""
-          echo "=================================================="
-          echo "Validating GHES PAT (GH_SOURCE_PAT)"
-          echo "=================================================="
-      
-          GHES_STATUS=$(curl -sk \
-            -o /tmp/ghes_resp.json \
-            -w "%{http_code}" \
-            -H "Authorization: token ${GH_SOURCE_PAT}" \
+
+          GHES_BASE="${GHES_API_URL%/}"
+          GHES_STATUS=$(curl -skS -o /tmp/ghes_resp.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_SOURCE_PAT}" \
             -H "Accept: application/vnd.github+json" \
-            "${GHES_API_URL}/user")
-      
-          if [[ "${GHES_STATUS}" == "200" ]]; then
+            "${GHES_BASE}/user")
+
+          if [[ "$GHES_STATUS" == "200" ]]; then
             GHES_USER=$(jq -r '.login // "unknown"' /tmp/ghes_resp.json)
-            echo "✅ GH_SOURCE_PAT valid"
-            echo "Authenticated User: ${GHES_USER}"
             GHES_OK=true
+            echo "GHES PAT valid for ${GHES_USER}"
           else
-            echo "❌ GH_SOURCE_PAT validation failed"
-            cat /tmp/ghes_resp.json || true
+            echo "::error::GH_SOURCE_PAT validation failed with HTTP ${GHES_STATUS}"
+            jq -r '.message // "Unknown API error"' /tmp/ghes_resp.json || true
           fi
-      
+
           echo "gh_pat_valid=${GHEC_OK}" >> "$GITHUB_OUTPUT"
           echo "gh_source_pat_valid=${GHES_OK}" >> "$GITHUB_OUTPUT"
-      
           echo "gh_pat_user=${GHEC_USER}" >> "$GITHUB_OUTPUT"
           echo "gh_source_pat_user=${GHES_USER}" >> "$GITHUB_OUTPUT"
-      
-          echo ""
-          echo "=================================================="
-          echo "Validation Summary"
-          echo "=================================================="
-          echo "GH_PAT Valid          : ${GHEC_OK}"
-          echo "GH_PAT User           : ${GHEC_USER}"
-          echo "GH_SOURCE_PAT Valid   : ${GHES_OK}"
-          echo "GH_SOURCE_PAT User    : ${GHES_USER}"
-          echo "=================================================="
-      
-          if [[ "${GHEC_OK}" != "true" || "${GHES_OK}" != "true" ]]; then
-            echo "❌ One or more PAT validations failed."
-            exit 1
-          fi
-      
-          echo "✅ GH_PAT & GH_SOURCE_PAT validation successful."
-          
-      - name: Install/Update GEI extension
-        if: steps.validate_pats.outputs.gh_pat_valid == 'true' && steps.validate_pats.outputs.gh_source_pat_valid == 'true'
+
+          [[ "$GHEC_OK" == "true" && "$GHES_OK" == "true" ]] || exit 1
+
+      - name: Install or update GEI extension
         shell: bash
         run: |
           set -euo pipefail
-      
-          if [[ -z "$GH_TARGET_HOST" ]]; then
-              echo "$GH_PAT" | gh auth login --with-token
+          if gh extension list | awk '{print $1}' | grep -qx 'github/gh-gei'; then
+            gh extension upgrade github/gh-gei
           else
-              echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
+            gh extension install github/gh-gei
           fi
-      
-          gh auth status
-      
-          gh extension install https://github.com/github/gh-gei
-          # gh extension upgrade https://github.com/github/gh-gei
-      
           gh gei --help >/dev/null
 
       - name: Make scripts executable
@@ -196,112 +200,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f "${{ inputs.csv_path }}"
           cp "${{ inputs.csv_path }}" scripts/repos.csv
-          echo "✅ CSV copied: ${{ inputs.csv_path }} → scripts/repos.csv"
 
       - name: Run pre-migration checks
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/1_migration-readiness.sh | tee precheck.log
+          ./scripts/1_migration-readiness.sh 2>&1 | tee precheck.log
 
-      - name: Publish pre-validation consolidated summary (same lines as script)
-        if: always()
+      - name: Publish pre-validation summary
+        if: ${{ always() }}
         shell: bash
         run: |
           {
-            echo "## 🔎 Pre‑Migration Validation Summary"
-            echo ""
-            echo "**CSV:** \`${{ inputs.csv_path }}\` (copied to \`scripts/repos.csv\`)"
-            echo ""
-            echo "### Consolidated summary (from script output)"
-            grep -E "Total Repositories Processed:|Repositories with Active Pull Requests:|Repositories with Workflows \(Running or Queued\):|Repositories with Open Issues:" precheck.log |
-              sed 's/^/- /' || true
+            echo "## Pre-Migration Validation Summary"
+            echo
+            echo "**CSV:** \`${{ inputs.csv_path }}\`"
+            echo
+            if [[ -f precheck.log ]]; then
+              grep -E "Total Repositories Processed:|Repositories with Active Pull Requests:|Repositories with Workflows \(Running or Queued\):|Repositories with Open Issues:" precheck.log | sed 's/^/- /' || true
+            else
+              echo "> [!CAUTION]"
+              echo "> precheck.log was not created."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish pre-validation repo-wise summary (table) ✅ fixed
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import csv, os, re
-          from pathlib import Path
-
-          pre = Path("precheck.log")
-          csv_path = Path("scripts/repos.csv")
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-
-          def append(md: str):
-            if summary.exists():
-              summary.write_text(summary.read_text(encoding="utf-8") + md, encoding="utf-8")
-            else:
-              summary.write_text(md, encoding="utf-8")
-
-          if not pre.exists():
-            append("\n> [!CAUTION]\n> precheck.log not found, cannot generate repo-wise pre-validation summary.\n")
-            raise SystemExit(0)
-
-          repo_to_org = {}
-          if csv_path.exists():
-            with csv_path.open(newline="", encoding="utf-8") as f:
-              reader = csv.DictReader(f)
-              for r in reader:
-                repo = (r.get("ghes_repo") or "").strip()
-                org = (r.get("ghes_org") or "").strip()
-                if repo:
-                  repo_to_org[repo] = org or "?"
-
-          ansi = re.compile(r"\x1b\[[0-9;]*m")
-          lines = [ansi.sub("", l.rstrip("\n")) for l in pre.read_text(errors="replace").splitlines()]
-
-          start = None
-          for i, l in enumerate(lines):
-            if l.strip() == "Repository-Specific Results:":
-              start = i + 1
-              break
-
-          if start is None:
-            append("\n> [!CAUTION]\n> Could not find 'Repository-Specific Results:' section in precheck.log.\n")
-            raise SystemExit(0)
-
-          results = {}
-          sep_seen = 0
-          for l in lines[start:]:
-            s = l.strip()
-            if s.startswith("============================="):
-              sep_seen += 1
-              if sep_seen >= 2:
-                break
-              continue
-            if ":" in l:
-              repo, status = l.split(":", 1)
-              results[repo.strip()] = status.strip()
-
-          if not results:
-            append("\n> [!CAUTION]\n> Repo-wise section detected but no repo rows were parsed. Check precheck.log formatting.\n")
-            raise SystemExit(0)
-
-          def cell(ok: bool):
-            return "✅" if ok else "⚠️"
-
-          append("\n### 📌 Repo-wise pre-migration status\n\n")
-          append("| Repository (GHES) | Active PRs | Workflows Running/Queued | Open Issues | Overall |\n")
-          append("|---|---|---|---|---|\n")
-
-          for repo in sorted(results.keys()):
-            status = results[repo]
-            has_pr = "Active PR" in status
-            has_wf = "Workflow" in status
-            has_issues = "Open Issues" in status
-            overall = "✅ Clean" if ("No Active/Open Items" in status) else "⚠️ Review required"
-            src = f"{repo_to_org.get(repo,'?')}/{repo}"
-            append(f"| `{src}` | {cell(not has_pr)} | {cell(not has_wf)} | {cell(not has_issues)} | {overall} |\n")
-
-          append("\n**Legend:** ✅ = none found, ⚠️ = found items that need review\n")
-          PY
-
       - name: Upload precheck artifacts
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: stage1-precheck-${{ github.run_id }}
@@ -310,19 +236,18 @@ jobs:
             scripts/repos.csv
           if-no-files-found: warn
 
-  # ------------------------------------------------------------
-  # Stage 2: Migration (script 2)  ✅ environment gate added
-  # ------------------------------------------------------------
   migration:
-    name: Stage 2 - Migration (GHES → GitHub)
+    name: Stage 2 - Migration (GHES to GHEC)
     environment: migration-approval
+    needs: [pre-migration-validation]
+    if: >-
+      ${{ always() &&
+          inputs.migration_path == 'ghes-to-ghec' &&
+          inputs.run_migration == 'true' &&
+          (needs.pre-migration-validation.result == 'success' ||
+           needs.pre-migration-validation.result == 'skipped') }}
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 360
-    needs: [pre-migration-validation]
-    if: ${{ always()
-      && inputs.run_migration == 'true'
-      && (needs.pre-migration-validation.result == 'success'
-          || needs.pre-migration-validation.result == 'skipped') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -333,70 +258,51 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq gh python3
-          gh --version
-          jq --version
-          python3 --version
+          sudo apt-get install -y jq gh python3 curl
 
-      - name: Install/Update GEI extension
+      - name: Install or update GEI extension
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$GH_TARGET_HOST" ]]; then
-              echo "$GH_PAT" | gh auth login --with-token
+          if gh extension list | awk '{print $1}' | grep -qx 'github/gh-gei'; then
+            gh extension upgrade github/gh-gei
           else
-              echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
+            gh extension install github/gh-gei
           fi
-          gh extension install https://github.com/github/gh-gei
-          # gh extension upgrade https://github.com/github/gh-gei
           gh gei --help >/dev/null
 
-      - name: Make scripts executable
-        shell: bash
-        run: chmod +x scripts/*.sh
-
-      - name: Prepare CSV for scripts
+      - name: Make scripts executable and prepare CSV
         shell: bash
         run: |
           set -euo pipefail
+          chmod +x scripts/*.sh
+          test -f "${{ inputs.csv_path }}"
           cp "${{ inputs.csv_path }}" scripts/repos.csv
-          echo "✅ CSV copied: ${{ inputs.csv_path }} → scripts/repos.csv"
 
-      - name: Run migration (parallel)
+      - name: Run migration in parallel
         shell: bash
         run: |
-          GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
+          export GH_TARGET_HOST
           ./scripts/2_migration.sh \
             --max-concurrent "${{ inputs.max_concurrent }}" \
-            --csv "scripts/repos.csv" \
+            --csv scripts/repos.csv \
             --output repo_migration_output.csv \
-            | tee migration.log
+            2>&1 | tee migration.log
 
-      - name: Capture Octoshift (gh gei) logs into tar
-        if: always()
+      - name: Capture Octoshift logs
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p octoshift-logs
-
-          # Capture ONLY the files you showed (octoshift logs created in execution dir)
-          cp -v *.octoshift*.log octoshift-logs/ 2>/dev/null || true
-
-          # (Optional but useful) include your workflow logs too
+          cp -v ./*.octoshift*.log octoshift-logs/ 2>/dev/null || true
           cp -v migration.log repo_migration_output.csv octoshift-logs/ 2>/dev/null || true
           cp -v migration-*.txt octoshift-logs/ 2>/dev/null || true
-
-          # Create tar.gz
           tar -czf octoshift-logs.tgz octoshift-logs
 
-          echo "## 📦 Octoshift logs captured" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Included: \`*.octoshift*.log\` (plus migration outputs if present)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Artifact: \`octoshift-logs.tgz\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish migration summary (repo-wise + migrated links)
-        if: always()
+      - name: Publish migration summary
+        if: ${{ always() }}
         shell: bash
         run: |
           python3 - <<'PY'
@@ -404,53 +310,24 @@ jobs:
           from pathlib import Path
           out = Path("repo_migration_output.csv")
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-
-          def w(line=""):
-            if summary.exists():
-              summary.write_text(summary.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
-            else:
-              summary.write_text(line + "\n", encoding="utf-8")
-
-          w("## 🚀 Migration Summary (GHES → GitHub)")
-          w("")
-          w(f"- **Concurrency:** `${{ inputs.max_concurrent }}`")
-          w("")
-
+          lines = ["## Migration Summary (GHES to GHEC)", "", f"- **Concurrency:** `${{ inputs.max_concurrent }}`", ""]
           if not out.exists():
-            w("> [!CAUTION]")
-            w("> `repo_migration_output.csv` not found. Check `migration.log`.")
-            raise SystemExit(0)
-
-          rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
-          success = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("success"))
-          failure = sum(1 for r in rows if (r.get("Migration_Status","") or "").lower().startswith("failure"))
-
-          w("### 📊 Totals")
-          w(f"- ✅ Success: **{success}**")
-          w(f"- ❌ Failure: **{failure}**")
-          w("")
-          w("### 📌 Per-repo status & migrated links")
-          w("| Source (GHES) | Status | Target (GitHub) |")
-          w("|---|---|---|")
-
-          for r in rows:
-            src = f"{(r.get('ghes_org') or '').strip()}/{(r.get('ghes_repo') or '').strip()}"
-            status = (r.get("Migration_Status") or "").strip()
-            gh_org = (r.get("github_org") or "").strip()
-            gh_repo = (r.get("github_repo") or "").strip()
-            if status.lower().startswith("success") and gh_org and gh_repo:
-              link = f"https://github.com/{gh_org}/{gh_repo}"
-              w(f"| `{src}` | ✅ Success | {link} |")
-            else:
-              w(f"| `{src}` | ❌ {status or 'Unknown'} | - |")
-
-          w("")
-          w("### 📁 Artifacts")
-          w("- `repo_migration_output.csv`, `migration.log`, `migration-*.txt`")
+              lines += ["> [!CAUTION]", "> `repo_migration_output.csv` was not created. Check `migration.log`."]
+          else:
+              rows = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
+              ok = sum((r.get("Migration_Status") or "").lower().startswith("success") for r in rows)
+              failed = len(rows) - ok
+              lines += [f"- Success: **{ok}**", f"- Not successful: **{failed}**", "", "| Source | Status | Target |", "|---|---|---|"]
+              for r in rows:
+                  src = f"{r.get('ghes_org','')}/{r.get('ghes_repo','')}"
+                  dst = f"{r.get('github_org','')}/{r.get('github_repo','')}"
+                  status = r.get("Migration_Status") or "Unknown"
+                  lines.append(f"| `{src}` | {status} | `{dst}` |")
+          summary.write_text(summary.read_text(encoding="utf-8") + "\n".join(lines) + "\n", encoding="utf-8")
           PY
 
       - name: Upload migration artifacts
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: stage2-migration-${{ github.run_id }}
@@ -461,17 +338,16 @@ jobs:
             octoshift-logs.tgz
           if-no-files-found: warn
 
-  # ------------------------------------------------------------
-  # Stage 3: Post-migration validation (script 3)
-  # ------------------------------------------------------------
   post-migration-validation:
     name: Stage 3 - Post-migration validation
+    needs: [migration]
+    if: >-
+      ${{ always() &&
+          inputs.migration_path == 'ghes-to-ghec' &&
+          inputs.run_post_validation == 'true' &&
+          needs.migration.result == 'success' }}
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 180
-    needs: [migration]
-    if: ${{ always() 
-      && inputs.run_post_validation == 'true' 
-      && needs.migration.result == 'success' }} 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -483,141 +359,44 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh python3
-          gh --version
-          jq --version
-          python3 --version
 
-      - name: Make scripts executable
-        shell: bash
-        run: chmod +x scripts/*.sh
-
-      - name: Prepare CSV for scripts
+      - name: Prepare scripts and CSV
         shell: bash
         run: |
           set -euo pipefail
+          chmod +x scripts/*.sh
+          test -f "${{ inputs.csv_path }}"
           cp "${{ inputs.csv_path }}" scripts/repos.csv
-          echo "✅ CSV copied: ${{ inputs.csv_path }} → scripts/repos.csv"
 
-      - name: Run post-migration validation
+      - name: Authenticate and run post-migration validation
         shell: bash
         run: |
-          GH_TARGET_HOST="$GH_TARGET_HOST"
-          if [[ -z "$GH_TARGET_HOST" ]]; then
-              echo "$GH_PAT" | gh auth login --with-token
-          else
-              echo "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
-          fi
           set -euo pipefail
-          ./scripts/3_post_migration_validation.sh | tee post_validation.log
+          if [[ -n "${GH_TARGET_HOST:-}" ]]; then
+            printf '%s' "$GH_PAT" | gh auth login --hostname "$GH_TARGET_HOST" --with-token
+          else
+            printf '%s' "$GH_PAT" | gh auth login --hostname github.com --with-token
+          fi
+          export GH_TARGET_HOST
+          ./scripts/3_post_migration_validation.sh 2>&1 | tee post_validation.log
 
-      - name: Publish post-validation repo-wise summary (branch/commit/SHA)
-        if: always()
+      - name: Publish post-validation summary
+        if: ${{ always() }}
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os, re
-          from pathlib import Path
-
-          log = Path("post_validation.log")
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-
-          def append(md: str):
-            if summary.exists():
-              summary.write_text(summary.read_text(encoding="utf-8") + md, encoding="utf-8")
-            else:
-              summary.write_text(md, encoding="utf-8")
-
-          if not log.exists():
-            append("\n> [!CAUTION]\n> post_validation.log not found, cannot generate repo-wise post-validation summary.\n")
-            raise SystemExit(0)
-
-          lines = log.read_text(errors="replace").splitlines()
-          repo_hdr = re.compile(r"Validating migration:\s+(.+?)/(.+?)\s+->\s+(.+?)/(.+)$")
-
-          sections = []
-          current = None
-          for l in lines:
-            m = repo_hdr.search(l)
-            if m:
-              if current:
-                sections.append(current)
-              current = {"src_org": m.group(1).strip(), "src_repo": m.group(2).strip(),
-                         "dst_org": m.group(3).strip(), "dst_repo": m.group(4).strip(),
-                         "lines": []}
-            elif current is not None:
-              current["lines"].append(l)
-          if current:
-            sections.append(current)
-
-          branch_count_re = re.compile(r"Branch Count:.*(✅ Matching|❌ Not Matching)")
-          commit_re = re.compile(r"Branch '(.+?)': GHES Commits=.*(✅ Matching|❌ Not Matching)")
-          sha_re = re.compile(r"Branch '(.+?)': GHES SHA=.*(✅ Matching|❌ Not Matching)")
-
-          def icon(v):
-            if v is True: return "✅"
-            if v is False: return "❌"
-            return "❓"
-
-          results = []
-          for s in sections:
-            branch_count_ok = None
-            commit_status = {}
-            sha_status = {}
-            for l in s["lines"]:
-              m = branch_count_re.search(l)
-              if m:
-                branch_count_ok = (m.group(1) == "✅ Matching")
-              m = commit_re.search(l)
-              if m:
-                commit_status[m.group(1)] = (m.group(2) == "✅ Matching")
-              m = sha_re.search(l)
-              if m:
-                sha_status[m.group(1)] = (m.group(2) == "✅ Matching")
-
-            commit_ok = None if not commit_status else all(commit_status.values())
-            sha_ok = None if not sha_status else all(sha_status.values())
-
-            results.append({**s,
-                            "branch_count_ok": branch_count_ok,
-                            "commit_ok": commit_ok,
-                            "sha_ok": sha_ok,
-                            "commit_bad": [b for b,v in commit_status.items() if not v],
-                            "sha_bad": [b for b,v in sha_status.items() if not v]})
-
-          append("\n## 🔎 Post‑Migration Validation Summary (repo‑wise)\n\n")
-          append("| Repository (GHES) | Branch Count | Commit Counts | SHA Match | Target Link | Details |\n")
-          append("|---|---|---|---|---|---|\n")
-
-          for r in results:
-            src = f"{r['src_org']}/{r['src_repo']}"
-            link = f"https://github.com/{r['dst_org']}/{r['dst_repo']}"
-            details = []
-            if r["branch_count_ok"] is False:
-              details.append("branch count mismatch")
-            if r["commit_bad"]:
-              details.append("commit mismatch: " + ", ".join(r["commit_bad"]))
-            if r["sha_bad"]:
-              details.append("sha mismatch: " + ", ".join(r["sha_bad"]))
-            d = "OK" if not details else "<br>".join(details)
-            append(f"| `{src}` | {icon(r['branch_count_ok'])} | {icon(r['commit_ok'])} | {icon(r['sha_ok'])} | {link} | {d} |\n")
-
-          append("\n<details>\n<summary>Show mismatch details</summary>\n\n")
-          for r in results:
-            if r["branch_count_ok"] is False or r["commit_bad"] or r["sha_bad"]:
-              append(f"### `{r['src_org']}/{r['src_repo']}` → `{r['dst_org']}/{r['dst_repo']}`\n")
-              append(f"- Branch count: {icon(r['branch_count_ok'])}\n")
-              append(f"- Commit counts: {icon(r['commit_ok'])}\n")
-              append(f"- SHA match: {icon(r['sha_ok'])}\n")
-              if r["commit_bad"]:
-                append(f"- Commit mismatched branches: {', '.join(r['commit_bad'])}\n")
-              if r["sha_bad"]:
-                append(f"- SHA mismatched branches: {', '.join(r['sha_bad'])}\n")
-              append("\n")
-          append("</details>\n")
-          PY
+          {
+            echo "## Post-Migration Validation Summary"
+            echo
+            if [[ -f post_validation.log ]]; then
+              grep -E "Validating migration:|Branch Count:|GHES Commits=|GHES SHA=" post_validation.log | sed 's/^/- /' || true
+            else
+              echo "> [!CAUTION]"
+              echo "> post_validation.log was not created."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload post-validation artifacts
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: stage3-postvalidation-${{ github.run_id }}
@@ -627,19 +406,17 @@ jobs:
             validation-*.json
           if-no-files-found: warn
 
-  # ============================================================
-  # ✅ Stage 4 (Vars Migration) - runs ONLY after Stage 3 success
-  # ✅ environment gate added
-  # ============================================================
   vars-migration:
-    name: Stage 4 - Vars Migration (GHES → GHEC)
+    name: Stage 4 - Variables migration (GHES to GHEC)
     environment: migration-approval
+    needs: [post-migration-validation]
+    if: >-
+      ${{ always() &&
+          inputs.migration_path == 'ghes-to-ghec' &&
+          inputs.run_vars_migration == 'true' &&
+          needs.post-migration-validation.result == 'success' }}
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 180
-    needs: [post-migration-validation]
-    if: ${{ always()
-      && inputs.run_vars_migration == 'true'
-      && needs.post-migration-validation.result == 'success' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -651,109 +428,258 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh
-          gh --version
-          jq --version
 
-      - name: Make scripts executable
-        shell: bash
-        run: chmod +x scripts/*.sh
-
-      - name: Prepare CSV for vars script
+      - name: Prepare scripts and CSV
         shell: bash
         run: |
           set -euo pipefail
+          chmod +x scripts/*.sh
+          test -f "${{ inputs.csv_path }}"
           cp "${{ inputs.csv_path }}" scripts/repos.csv
-          echo "✅ CSV copied: ${{ inputs.csv_path }} → scripts/repos.csv"
 
-      - name: Authenticate GH CLI to GHES host (Stage 4 only)
+      - name: Authenticate GitHub CLI to GHES
         shell: bash
         run: |
           set -euo pipefail
-
-          # Derive the same host as your script
-          SOURCE_HOST="$GHES_API_URL"
-          [[ "$SOURCE_HOST" != *"://"* ]] && SOURCE_HOST="https://$SOURCE_HOST"
-          SOURCE_HOST="${SOURCE_HOST#*://}"
+          SOURCE_HOST="${GHES_API_URL#*://}"
           SOURCE_HOST="${SOURCE_HOST%%/*}"
+          printf '%s' "$GH_SOURCE_PAT" | gh auth login --hostname "$SOURCE_HOST" --with-token
+          gh auth status --hostname "$SOURCE_HOST"
 
-          # Login to GHES host so `gh` stores the auth for that hostname
-          echo "${GH_SOURCE_PAT}" | gh auth login --hostname "${SOURCE_HOST}" --with-token
-
-          # Optional: show status (no token printed)
-          gh auth status --hostname "${SOURCE_HOST}" || true
-
-      - name: Run vars migration script
+      - name: Run variables migration script
         shell: bash
         run: |
-          GH_TARGET_HOST="$GH_TARGET_HOST"
           set -euo pipefail
           export CSV_FILE="scripts/repos.csv"
+          export GH_TARGET_HOST
           ./scripts/4_ghes_ghec_var_mig.sh 2>&1 | tee vars_migration.log
 
-      - name: Publish Stage 4 vars migration summary
-        if: always()
+      - name: Publish variables migration summary
+        if: ${{ always() }}
         shell: bash
         run: |
           {
-            echo "## 🔁 Stage 4 — Variables Migration Summary"
-            echo ""
-
-            echo "### 📌 Execution status"
-            if grep -q "Starting GHES -> GHEC Full Migration" vars_migration.log; then
-              echo "- ✅ Script started"
-            else
-              echo "- ❌ Script did not start"
-            fi
-
-            if grep -q "Migration Complete" vars_migration.log; then
-              echo "- ✅ Script completed successfully"
-            else
-              echo "- ❌ Script exited before completion"
-            fi
-
-            echo ""
-            echo "### 📦 Repositories processed"
-            grep -E "Processing:" vars_migration.log | sed 's/^/- /' || echo "- ❌ None"
-
-            echo ""
-            echo "### 🏢 Org Variables"
-            if grep -q "Syncing Org Vars" vars_migration.log; then
-              echo "- ✅ Org variables sync attempted"
-            else
-              echo "- ⚠️ Org variables step not reached"
-            fi
-
-            echo ""
-            echo "### 📁 Repo Variables"
-            if grep -q "Syncing Repo Vars" vars_migration.log; then
-              echo "- ✅ Repo variables sync attempted"
-            else
-              echo "- ⚠️ Repo variables step not reached"
-            fi
-
-            echo ""
-            echo "### 🌱 Environment Rules"
-            grep -E "rules synced" vars_migration.log | sed 's/^/- /' || echo "- ⚠️ No environment rules synced"
-
-            echo ""
-            echo "### 🔐 Environment Variables"
-            grep -E "Env Var:" vars_migration.log | sed 's/^/- /' || echo "- ⚠️ No environment variables synced"
-
-            echo ""
-            echo "### ❌ Failure point (if any)"
-            grep -E "Error:|401|403|404" vars_migration.log | sed 's/^/- /' || echo "- ✅ No explicit API error logged"
-
-            echo ""
-            echo "### 📄 Artifacts"
-            echo "- \`vars_migration.log\` (full execution log)"
+            echo "## Variables Migration Summary"
+            echo
+            grep -E "Processing:|Syncing Org Vars|Syncing Repo Vars|rules synced|Env Var:|Migration Complete|Error:|401|403|404" vars_migration.log | sed 's/^/- /' || true
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload vars migration artifacts
-        if: always()
+      - name: Upload variables migration artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: stage4-vars-migration-${{ github.run_id }}
           path: |
             vars_migration.log
             scripts/repos.csv
+          if-no-files-found: warn
+
+  ghec-to-ghec-emu-org-migration:
+    name: GHEC to GHEC EMU - Organization migration
+    environment: emu-migration-approval
+    if: ${{ inputs.migration_path == 'ghec-to-ghec-emu' && inputs.run_emu_org_migration == 'true' }}
+    runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
+    timeout-minutes: 720
+    env:
+      # Create these as secrets in the protected emu-migration-approval environment.
+      GH_SOURCE_PAT: ${{ secrets.GHEC_EMU_SOURCE_PAT }}
+      GH_PAT: ${{ secrets.GHEC_EMU_TARGET_PAT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install prerequisites (GitHub-hosted only)
+        if: ${{ inputs.runner == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gh jq curl
+          gh --version
+
+      - name: Validate required inputs and secrets
+        shell: bash
+        env:
+          SOURCE_ORG: ${{ inputs.ghec_source_org }}
+          TARGET_ORG: ${{ inputs.emu_target_org }}
+          TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+        run: |
+          set -euo pipefail
+          : "${SOURCE_ORG:?ghec_source_org is required}"
+          : "${TARGET_ORG:?emu_target_org is required}"
+          : "${TARGET_ENTERPRISE:?emu_target_enterprise is required}"
+          : "${GH_SOURCE_PAT:?GHEC_EMU_SOURCE_PAT secret is required}"
+          : "${GH_PAT:?GHEC_EMU_TARGET_PAT secret is required}"
+          [[ "$SOURCE_ORG" != "$TARGET_ORG" ]] || {
+            echo "::error::Source and target organization names must be different."
+            exit 1
+          }
+          if [[ -n "$TARGET_API_URL" && ! "$TARGET_API_URL" =~ ^https://api\.[A-Za-z0-9.-]+\.ghe\.com/?$ ]]; then
+            echo "::error::emu_target_api_url must be a GHE.com base API URL such as https://api.example.ghe.com"
+            exit 1
+          fi
+
+      - name: Validate source and target PATs
+        id: validate_emu_pats
+        shell: bash
+        env:
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+        run: |
+          set -euo pipefail
+          SOURCE_API_URL="https://api.github.com"
+          EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
+          EFFECTIVE_TARGET_API_URL="${EFFECTIVE_TARGET_API_URL%/}"
+
+          source_status=$(curl -sS -o source-user.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_SOURCE_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${SOURCE_API_URL}/user")
+          [[ "$source_status" == "200" ]] || {
+            echo "::error::Source PAT validation failed with HTTP ${source_status}"
+            jq -r '.message // "Unknown API error"' source-user.json || true
+            exit 1
+          }
+
+          target_status=$(curl -sS -o target-user.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${EFFECTIVE_TARGET_API_URL}/user")
+          [[ "$target_status" == "200" ]] || {
+            echo "::error::Target PAT validation failed with HTTP ${target_status}"
+            jq -r '.message // "Unknown API error"' target-user.json || true
+            exit 1
+          }
+
+          source_user=$(jq -r '.login // "unknown"' source-user.json)
+          target_user=$(jq -r '.login // "unknown"' target-user.json)
+          echo "source_user=${source_user}" >> "$GITHUB_OUTPUT"
+          echo "target_user=${target_user}" >> "$GITHUB_OUTPUT"
+          echo "target_api_url=${EFFECTIVE_TARGET_API_URL}" >> "$GITHUB_OUTPUT"
+          rm -f source-user.json target-user.json
+
+      - name: Install or update GEI extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh extension list | awk '{print $1}' | grep -qx 'github/gh-gei'; then
+            gh extension upgrade github/gh-gei
+          else
+            gh extension install github/gh-gei
+          fi
+          gh gei migrate-org --help
+
+      - name: Verify target organization name is unused
+        shell: bash
+        env:
+          TARGET_ORG: ${{ inputs.emu_target_org }}
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+        run: |
+          set -euo pipefail
+          EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
+          EFFECTIVE_TARGET_API_URL="${EFFECTIVE_TARGET_API_URL%/}"
+          status=$(curl -sS -o target-org-check.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${EFFECTIVE_TARGET_API_URL}/orgs/${TARGET_ORG}")
+          case "$status" in
+            404)
+              echo "Target organization name is available: ${TARGET_ORG}"
+              ;;
+            200)
+              echo "::error::Target organization '${TARGET_ORG}' already exists. Organization migration creates a new organization."
+              exit 1
+              ;;
+            *)
+              echo "::error::Could not verify target organization. HTTP ${status}"
+              jq -r '.message // "Unknown API error"' target-org-check.json || true
+              exit 1
+              ;;
+          esac
+          rm -f target-org-check.json
+
+      - name: Run GHEC to GHEC EMU organization migration
+        id: emu_org_migration
+        shell: bash
+        env:
+          SOURCE_ORG: ${{ inputs.ghec_source_org }}
+          TARGET_ORG: ${{ inputs.emu_target_org }}
+          TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+          RUN_TYPE: ${{ inputs.emu_run_type }}
+        run: |
+          set -uo pipefail
+          args=(
+            gh gei migrate-org
+            --github-source-org "$SOURCE_ORG"
+            --github-target-org "$TARGET_ORG"
+            --github-target-enterprise "$TARGET_ENTERPRISE"
+          )
+          if [[ -n "$TARGET_API_URL" ]]; then
+            args+=(--target-api-url "${TARGET_API_URL%/}")
+          fi
+
+          echo "Run classification: ${RUN_TYPE}"
+          echo "Starting organization migration: ${SOURCE_ORG} -> ${TARGET_ENTERPRISE}/${TARGET_ORG}"
+          set +e
+          "${args[@]}" 2>&1 | tee emu_org_migration.log
+          migration_exit_code=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=${migration_exit_code}" >> "$GITHUB_OUTPUT"
+          exit "$migration_exit_code"
+
+      - name: Capture GEI logs
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p emu-org-migration-artifacts
+          cp -v emu_org_migration.log emu-org-migration-artifacts/ 2>/dev/null || true
+          cp -v ./*.octoshift*.log emu-org-migration-artifacts/ 2>/dev/null || true
+          tar -czf emu-org-migration-artifacts.tgz emu-org-migration-artifacts
+
+      - name: Publish EMU organization migration summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          SOURCE_ORG: ${{ inputs.ghec_source_org }}
+          TARGET_ORG: ${{ inputs.emu_target_org }}
+          TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+          RUN_TYPE: ${{ inputs.emu_run_type }}
+          MIGRATION_EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
+          SOURCE_USER: ${{ steps.validate_emu_pats.outputs.source_user }}
+          TARGET_USER: ${{ steps.validate_emu_pats.outputs.target_user }}
+        run: |
+          {
+            echo "## GHEC to GHEC EMU Organization Migration"
+            echo
+            echo "- **Run classification:** \`${RUN_TYPE}\`"
+            echo "- **Source organization:** \`${SOURCE_ORG}\`"
+            echo "- **Target organization:** \`${TARGET_ORG}\`"
+            echo "- **Target enterprise:** \`${TARGET_ENTERPRISE}\`"
+            echo "- **Target API:** \`${TARGET_API_URL:-https://api.github.com}\`"
+            echo "- **Source identity:** \`${SOURCE_USER:-not-available}\`"
+            echo "- **Target identity:** \`${TARGET_USER:-not-available}\`"
+            echo "- **Command exit code:** \`${MIGRATION_EXIT_CODE:-not-available}\`"
+            echo
+            echo "### Required follow-up"
+            echo "- Review the GEI migration-log repository and Octoshift logs."
+            echo "- Validate repositories, teams, permissions, issues, pull requests, and workflows."
+            echo "- Reclaim mannequins after EMU users have been provisioned."
+            echo "- Reconfigure unsupported operational settings such as secrets, runners, apps, and integrations as applicable."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload EMU migration artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghec-to-ghec-emu-org-${{ github.run_id }}
+          path: |
+            emu_org_migration.log
+            emu-org-migration-artifacts.tgz
+            *.octoshift*.log
           if-no-files-found: warn
