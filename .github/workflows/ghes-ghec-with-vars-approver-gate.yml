@@ -707,7 +707,6 @@ jobs:
             echo "| Source Organization | \`${SOURCE_ORG}\` |"
             echo "| Target Organization | \`${TARGET_ORG}\` |"
             echo "| Target Enterprise | \`${TARGET_ENTERPRISE}\` |"
-            echo "| Run Type | \`${RUN_TYPE}\` |"
             echo "| Exit Code | \`${EXIT_CODE:-not-available}\` |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -716,66 +715,70 @@ jobs:
           # Only attempt repo inventory when migration succeeded
           #
           if [[ "${EXIT_CODE}" == "0" ]]; then
-      
+
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "### 📦 Repositories in Target Organization" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Repositories in Target Organization" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-      
+          
+            TARGET_API="${TARGET_API_URL:-https://api.github.com}"
+            TARGET_API="${TARGET_API%/}"
+          
+            if [[ "$TARGET_API" == "https://api.github.com" ]]; then
+              TARGET_HOST="github.com"
+            else
+              TARGET_HOST="${TARGET_API#https://api.}"
+              TARGET_HOST="${TARGET_HOST%%/*}"
+            fi
+          
+            echo "Collecting repositories from ${TARGET_ORG}..."
+          
             gh api \
+              --hostname "$TARGET_HOST" \
               --paginate \
-              "/orgs/${TARGET_ORG}/repos?per_page=100" \
-              > repos.json
-      
-            REPO_COUNT=$(jq length repos.json 2>/dev/null)
-      
+              "/orgs/${TARGET_ORG}/repos?per_page=100&type=all" \
+              --jq '.[]' | jq -s '.' > repos.json
+          
+            REPO_COUNT=$(jq '. | length' repos.json)
+          
             echo "- Total Repositories: **${REPO_COUNT}**" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-      
-            echo "| Repository | Visibility | Default Branch |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|------------|------------|----------------|" >> "$GITHUB_STEP_SUMMARY"
-      
-            jq -r '
-              .[] |
-              "| \(.name) | \(.visibility) | \(.default_branch) |"
-            ' repos.json >> "$GITHUB_STEP_SUMMARY"
-      
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-      
-            #
-            # Save inventory artifact
-            #
-            jq -r '
-              .[] |
-              [
-                .name,
-                .visibility,
-                .default_branch,
-                .html_url
-              ] | @csv
-            ' repos.json > migrated_repositories.csv
-      
+          
+            if [[ "$REPO_COUNT" -gt 0 ]]; then
+          
+              echo "| Repository | Visibility | Default Branch |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|------------|------------|----------------|" >> "$GITHUB_STEP_SUMMARY"
+          
+              jq -r '
+                .[] |
+                "| \(.name) | \(.visibility) | \(.default_branch) |"
+              ' repos.json >> "$GITHUB_STEP_SUMMARY"
+          
+              jq -r '
+                .[] |
+                [
+                  .name,
+                  .visibility,
+                  .default_branch,
+                  .html_url
+                ] | @csv
+              ' repos.json > migrated_repositories.csv
+          
+            else
+          
+              echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+              echo "> No repositories were returned from ${TARGET_ORG}." >> "$GITHUB_STEP_SUMMARY"
+          
+              echo "repository,visibility,default_branch,html_url" > migrated_repositories.csv
+          
+            fi
+          
           else
-      
+          
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "> [!CAUTION]" >> "$GITHUB_STEP_SUMMARY"
-            echo "> Repository inventory skipped because migration did not complete successfully." >> "$GITHUB_STEP_SUMMARY"
-      
-          fi
-      
-          {
-            echo ""
-            echo "### ✅ Post Migration Validation Checklist"
-            echo ""
-            echo "- Review GEI migration logs"
-            echo "- Review Octoshift logs"
-            echo "- Validate repositories"
-            echo "- Validate teams and permissions"
-            echo "- Validate issues and pull requests"
-            echo "- Validate Actions workflows"
-            echo "- Reclaim mannequins (EMU)"
-            echo "- Reconfigure secrets, variables, runners, apps, and integrations"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "> Repository inventory skipped because migration was not successful." >> "$GITHUB_STEP_SUMMARY"
+          
+          fi          
           
       - name: Capture and upload EMU artifacts
         if: ${{ always() }}
