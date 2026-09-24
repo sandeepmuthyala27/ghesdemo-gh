@@ -693,12 +693,22 @@ jobs:
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
           EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+
+          # Use the PAT that has access to the target EMU organization.
+          # Change EMU_TARGET_PAT if your secret uses a different name.
+          GH_TOKEN: ${{ secrets.EMU_TARGET_PAT }}
+
         run: |
-          set +e
-      
+          set -uo pipefail
+
           TARGET_API="${TARGET_API_URL:-https://api.github.com}"
           TARGET_API="${TARGET_API%/}"
-      
+
+          # Always create the inventory files so the artifact step can upload them.
+          echo '[]' > repos.json
+          echo 'repository,visibility,default_branch,html_url' \
+            > migrated_repositories.csv
+
           {
             echo "## 🚀 EMU Organization Migration Result"
             echo ""
@@ -708,86 +718,207 @@ jobs:
             echo "| Target Organization | \`${TARGET_ORG}\` |"
             echo "| Target Enterprise | \`${TARGET_ENTERPRISE}\` |"
             echo "| Exit Code | \`${EXIT_CODE:-not-available}\` |"
+            echo "| Target API | \`${TARGET_API}\` |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-      
-          #
-          # Only attempt repo inventory when migration succeeded
-          #
-          if [[ "${EXIT_CODE}" == "0" ]]; then
 
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "### Repositories in Target Organization" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-          
-            TARGET_API="${TARGET_API_URL:-https://api.github.com}"
-            TARGET_API="${TARGET_API%/}"
-          
-            if [[ "$TARGET_API" == "https://api.github.com" ]]; then
-              TARGET_HOST="github.com"
-            else
-              TARGET_HOST="${TARGET_API#https://api.}"
-              TARGET_HOST="${TARGET_HOST%%/*}"
-            fi
-          
-            echo "Collecting repositories from ${TARGET_ORG}..."
-          
-            gh api \
-              --hostname "$TARGET_HOST" \
-              --paginate \
-              "/orgs/${TARGET_ORG}/repos?per_page=100&type=all" \
-              --jq '.[]' | jq -s '.' > repos.json
-          
-            REPO_COUNT=$(jq '. | length' repos.json)
-          
-            echo "- Total Repositories: **${REPO_COUNT}**" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-          
-            if [[ "$REPO_COUNT" -gt 0 ]]; then
-          
-              echo "| Repository | Visibility | Default Branch |" >> "$GITHUB_STEP_SUMMARY"
-              echo "|------------|------------|----------------|" >> "$GITHUB_STEP_SUMMARY"
-          
-              jq -r '
-                .[] |
-                "| \(.name) | \(.visibility) | \(.default_branch) |"
-              ' repos.json >> "$GITHUB_STEP_SUMMARY"
-          
-              jq -r '
+          #
+          # Only attempt repository inventory when migration succeeded.
+          #
+          if [[ "${EXIT_CODE:-}" != "0" ]]; then
+            {
+              echo "> [!CAUTION]"
+              echo "> Repository inventory skipped because the migration was not successful."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            exit 0
+          fi
+
+          {
+            echo "### Repositories in Target Organization"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          #
+          # Validate required values.
+          #
+          if [[ -z "${TARGET_ORG:-}" ]]; then
+            {
+              echo "> [!CAUTION]"
+              echo "> Repository inventory failed because TARGET_ORG is empty."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            exit 0
+          fi
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            {
+              echo "> [!CAUTION]"
+              echo "> Repository inventory failed because the target PAT is not available."
+              echo "> Configure the EMU_TARGET_PAT secret with access to the target organization."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            exit 0
+          fi
+
+          #
+          # Determine the hostname expected by GitHub CLI.
+          #
+          # https://api.github.com             -> github.com
+          # https://api.example.ghe.com        -> example.ghe.com
+          #
+          if [[ "$TARGET_API" == "https://api.github.com" ]]; then
+            TARGET_HOST="github.com"
+          else
+            TARGET_HOST="${TARGET_API#https://}"
+            TARGET_HOST="${TARGET_HOST#http://}"
+            TARGET_HOST="${TARGET_HOST%%/*}"
+            TARGET_HOST="${TARGET_HOST#api.}"
+          fi
+
+          echo "Target API: ${TARGET_API}"
+          echo "GitHub CLI hostname: ${TARGET_HOST}"
+          echo "Target organization: ${TARGET_ORG}"
+
+          #
+          # Confirm which account/host gh is using.
+          # This does not print the token.
+          #
+          gh auth status --hostname "$TARGET_HOST" || true
+
+          #
+          # Confirm that the PAT can see the organization.
+          #
+          if ! gh api \
+            --hostname "$TARGET_HOST" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/orgs/${TARGET_ORG}" \
+            --jq '{login: .login, id: .id}' \
+            > target-org.json 2> target-org-error.log; then
+
+            API_ERROR="$(tr '\n' ' ' < target-org-error.log)"
+
+            {
+              echo "> [!CAUTION]"
+              echo "> The target organization could not be read using the configured PAT."
+              echo ""
+              echo "\`\`\`text"
+              echo "${API_ERROR}"
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            exit 0
+          fi
+
+          echo "Target organization is accessible:"
+          cat target-org.json
+
+          #
+          # Retrieve every repository visible to the PAT.
+          #
+          # --paginate requests all pages.
+          # --slurp combines page arrays into one outer array.
+          # flatten converts the page arrays into one repository array.
+          #
+          if ! gh api \
+            --hostname "$TARGET_HOST" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --paginate \
+            --slurp \
+            "/orgs/${TARGET_ORG}/repos?per_page=100&type=all" \
+            --jq 'flatten' \
+            > repos.json 2> repos-api-error.log; then
+
+            API_ERROR="$(tr '\n' ' ' < repos-api-error.log)"
+
+            echo '[]' > repos.json
+
+            {
+              echo "> [!CAUTION]"
+              echo "> The repository API request failed."
+              echo ""
+              echo "\`\`\`text"
+              echo "${API_ERROR}"
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            exit 0
+          fi
+
+          #
+          # Confirm that the response is a valid JSON array.
+          #
+          if ! jq -e 'type == "array"' repos.json > /dev/null; then
+            {
+              echo "> [!CAUTION]"
+              echo "> GitHub returned an unexpected repository response."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            cat repos.json
+            echo '[]' > repos.json
+            exit 0
+          fi
+
+          REPO_COUNT="$(jq 'length' repos.json)"
+
+          {
+            echo "- Total Repositories: **${REPO_COUNT}**"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$REPO_COUNT" -gt 0 ]]; then
+            {
+              echo "| Repository | Visibility | Default Branch |"
+              echo "|------------|------------|----------------|"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            jq -r '
+              .[] |
+              "| \(.name) | \(.visibility // "unknown") | \(.default_branch // "not-set") |"
+            ' repos.json >> "$GITHUB_STEP_SUMMARY"
+
+            jq -r '
+              ["repository", "visibility", "default_branch", "html_url"],
+              (
                 .[] |
                 [
                   .name,
-                  .visibility,
-                  .default_branch,
+                  (.visibility // "unknown"),
+                  (.default_branch // ""),
                   .html_url
-                ] | @csv
-              ' repos.json > migrated_repositories.csv
-          
-            else
-          
-              echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
-              echo "> No repositories were returned from ${TARGET_ORG}." >> "$GITHUB_STEP_SUMMARY"
-          
-              echo "repository,visibility,default_branch,html_url" > migrated_repositories.csv
-          
-            fi
-          
+                ]
+              ) |
+              @csv
+            ' repos.json > migrated_repositories.csv
+
+            echo "Repositories returned by the target API:"
+            jq -r '.[].full_name' repos.json
           else
-          
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "> [!CAUTION]" >> "$GITHUB_STEP_SUMMARY"
-            echo "> Repository inventory skipped because migration was not successful." >> "$GITHUB_STEP_SUMMARY"
-          
-          fi          
-          
-      - name: Capture and upload EMU artifacts
+            {
+              echo "> [!WARNING]"
+              echo "> No repositories were returned from \`${TARGET_ORG}\`."
+              echo "> Verify that EMU_TARGET_PAT belongs to a user who can access the target organization and its repositories."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Capture EMU migration artifacts
         if: ${{ always() }}
         shell: bash
         run: |
           mkdir -p emu-org-logs
-          cp -v emu_org_migration.log ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
+
+          cp -v emu_org_migration.log emu-org-logs/ 2>/dev/null || true
+          cp -v ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
+          cp -v target-org.json emu-org-logs/ 2>/dev/null || true
+          cp -v target-org-error.log emu-org-logs/ 2>/dev/null || true
+          cp -v repos-api-error.log emu-org-logs/ 2>/dev/null || true
+          cp -v repos.json emu-org-logs/ 2>/dev/null || true
+          cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true
+
           tar -czf emu-org-migration-artifacts.tgz emu-org-logs
-          
+
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -797,8 +928,11 @@ jobs:
             emu_org_migration.log
             emu-org-migration-artifacts.tgz
             *.octoshift*.log
+            target-org.json
+            target-org-error.log
+            repos-api-error.log
           if-no-files-found: warn
-          
+
       - name: Upload migrated repository inventory
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
