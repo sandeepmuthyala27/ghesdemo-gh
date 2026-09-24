@@ -481,44 +481,78 @@ jobs:
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || fromJson(inputs.runner) }}
     timeout-minutes: 720
     env:
-      # Create these as secrets in the protected emu-migration-approval environment.
       GH_SOURCE_PAT: ${{ secrets.GHEC_EMU_SOURCE_PAT }}
       GH_PAT: ${{ secrets.GHEC_EMU_TARGET_PAT }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install prerequisites (GitHub-hosted only)
+      - uses: actions/checkout@v6
+      - name: Install prerequisites
         if: ${{ inputs.runner == 'ubuntu-latest' }}
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y gh jq curl
-          gh --version
 
-      - name: Validate required inputs and secrets
+      - name: Show and validate required inputs and secrets
         shell: bash
         env:
+          MIGRATION_PATH: ${{ inputs.migration_path }}
+          SELECTED_RUNNER: ${{ inputs.runner }}
           SOURCE_ORG: ${{ inputs.ghec_source_org }}
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
+          RUN_TYPE: ${{ inputs.emu_run_type }}
         run: |
           set -euo pipefail
-          : "${SOURCE_ORG:?ghec_source_org is required}"
-          : "${TARGET_ORG:?emu_target_org is required}"
-          : "${TARGET_ENTERPRISE:?emu_target_enterprise is required}"
-          : "${GH_SOURCE_PAT:?GHEC_EMU_SOURCE_PAT secret is required}"
-          : "${GH_PAT:?GHEC_EMU_TARGET_PAT secret is required}"
-          [[ "$SOURCE_ORG" != "$TARGET_ORG" ]] || {
+          EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
+          EFFECTIVE_TARGET_API_URL="${EFFECTIVE_TARGET_API_URL%/}"
+
+          echo "=================================================="
+          echo "GHEC -> GHEC EMU Migration Inputs"
+          echo "=================================================="
+          echo "Migration Path     : ${MIGRATION_PATH}"
+          echo "Runner             : ${SELECTED_RUNNER}"
+          echo "Source Org         : ${SOURCE_ORG}"
+          echo "Target Org         : ${TARGET_ORG}"
+          echo "Target Enterprise  : ${TARGET_ENTERPRISE}"
+          echo "Target API URL     : ${EFFECTIVE_TARGET_API_URL}"
+          echo "Run Type           : ${RUN_TYPE}"
+          echo "=================================================="
+
+          {
+            echo "## GHEC -> GHEC EMU Organization Migration"
+            echo
+            echo "### Migration inputs"
+            echo
+            echo "| Parameter | Value |"
+            echo "|---|---|"
+            echo "| Migration Path | \`${MIGRATION_PATH}\` |"
+            echo "| Runner | \`${SELECTED_RUNNER}\` |"
+            echo "| Source Organization | \`${SOURCE_ORG}\` |"
+            echo "| Target Organization | \`${TARGET_ORG}\` |"
+            echo "| Target Enterprise | \`${TARGET_ENTERPRISE}\` |"
+            echo "| Target API URL | \`${EFFECTIVE_TARGET_API_URL}\` |"
+            echo "| Run Type | \`${RUN_TYPE}\` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=false
+          [[ -n "$SOURCE_ORG" ]] || { echo "::error::ghec_source_org is required."; failed=true; }
+          [[ -n "$TARGET_ORG" ]] || { echo "::error::emu_target_org is required."; failed=true; }
+          [[ -n "$TARGET_ENTERPRISE" ]] || { echo "::error::emu_target_enterprise is required."; failed=true; }
+          [[ -n "${GH_SOURCE_PAT:-}" ]] || { echo "::error::GHEC_EMU_SOURCE_PAT secret is required."; failed=true; }
+          [[ -n "${GH_PAT:-}" ]] || { echo "::error::GHEC_EMU_TARGET_PAT secret is required."; failed=true; }
+          if [[ -n "$SOURCE_ORG" && -n "$TARGET_ORG" && "$SOURCE_ORG" == "$TARGET_ORG" ]]; then
             echo "::error::Source and target organization names must be different."
-            exit 1
-          }
-          if [[ -n "$TARGET_API_URL" && ! "$TARGET_API_URL" =~ ^https://api\.[A-Za-z0-9.-]+\.ghe\.com/?$ ]]; then
-            echo "::error::emu_target_api_url must be a GHE.com base API URL such as https://api.example.ghe.com"
-            exit 1
+            failed=true
           fi
+          if [[ -n "$TARGET_API_URL" && ! "$TARGET_API_URL" =~ ^https://api\.[A-Za-z0-9.-]+\.ghe\.com/?$ ]]; then
+            echo "::error::emu_target_api_url must be a GHE.com base API URL, for example https://api.example.ghe.com"
+            failed=true
+          fi
+          [[ "$failed" == false ]] || exit 1
+          echo "Input and secret validation successful."
+
       - name: Validate source and target PATs
         id: validate_emu_pats
         shell: bash
@@ -526,23 +560,23 @@ jobs:
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
         run: |
           set -uo pipefail
-      
+
           TARGET_API="${TARGET_API_URL:-https://api.github.com}"
           TARGET_API="${TARGET_API%/}"
-      
+
           SOURCE_STATUS="FAILED"
           TARGET_STATUS="FAILED"
-      
+
           SOURCE_USER="N/A"
           TARGET_USER="N/A"
-      
+
           SOURCE_HTTP="Unknown"
           TARGET_HTTP="Unknown"
-      
+
           echo "=================================================="
           echo "Validating SOURCE PAT"
           echo "=================================================="
-      
+
           SOURCE_HTTP=$(curl -sS \
             -o /tmp/source.json \
             -w "%{http_code}" \
@@ -550,7 +584,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/user")
-      
+
           if [[ "${SOURCE_HTTP}" == "200" ]]; then
             SOURCE_STATUS="SUCCESS"
             SOURCE_USER=$(jq -r '.login // "unknown"' /tmp/source.json)
@@ -560,12 +594,12 @@ jobs:
             echo "❌ Source PAT Invalid"
             echo "HTTP Status: ${SOURCE_HTTP}"
           fi
-      
+
           echo ""
           echo "=================================================="
           echo "Validating TARGET PAT"
           echo "=================================================="
-      
+
           TARGET_HTTP=$(curl -sS \
             -o /tmp/target.json \
             -w "%{http_code}" \
@@ -573,7 +607,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${TARGET_API}/user")
-      
+
           if [[ "${TARGET_HTTP}" == "200" ]]; then
             TARGET_STATUS="SUCCESS"
             TARGET_USER=$(jq -r '.login // "unknown"' /tmp/target.json)
@@ -583,13 +617,13 @@ jobs:
             echo "❌ Target PAT Invalid"
             echo "HTTP Status: ${TARGET_HTTP}"
           fi
-      
+
           echo "source_user=${SOURCE_USER}" >> "$GITHUB_OUTPUT"
           echo "target_user=${TARGET_USER}" >> "$GITHUB_OUTPUT"
-      
+
           echo "source_pat_status=${SOURCE_STATUS}" >> "$GITHUB_OUTPUT"
           echo "target_pat_status=${TARGET_STATUS}" >> "$GITHUB_OUTPUT"
-      
+
           {
             echo "## 🔑 PAT Validation Summary"
             echo ""
@@ -607,58 +641,39 @@ jobs:
             echo "- Target API Endpoint: \`${TARGET_API}\`"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-      
+
           if [[ "${SOURCE_STATUS}" != "SUCCESS" || "${TARGET_STATUS}" != "SUCCESS" ]]; then
             echo ""
             echo "❌ One or more PAT validations failed."
             exit 1
           fi
-      
+
           echo ""
           echo "✅ Source and Target PAT validation successful."
-            
-      - name: Install or update GEI extension
+
+      - name: Install or update GEI
         shell: bash
         run: |
           set -euo pipefail
-          if gh extension list | awk '{print $1}' | grep -qx 'github/gh-gei'; then
-            gh extension upgrade github/gh-gei
-          else
-            gh extension install github/gh-gei
-          fi
+          if gh extension list | awk '{print $1}' | grep -qx github/gh-gei; then gh extension upgrade github/gh-gei; else gh extension install github/gh-gei; fi
           gh gei migrate-org --help
 
-      - name: Verify target organization name is unused
+      - name: Verify target organization is unused
         shell: bash
         env:
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
         run: |
           set -euo pipefail
-          EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
-          EFFECTIVE_TARGET_API_URL="${EFFECTIVE_TARGET_API_URL%/}"
-          status=$(curl -sS -o target-org-check.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${EFFECTIVE_TARGET_API_URL}/orgs/${TARGET_ORG}")
+          TARGET_API="${TARGET_API_URL:-https://api.github.com}"; TARGET_API="${TARGET_API%/}"
+          status=$(curl -sS -o /tmp/org.json -w '%{http_code}' -H "Authorization: Bearer $GH_PAT" -H 'Accept: application/vnd.github+json' "$TARGET_API/orgs/$TARGET_ORG")
           case "$status" in
-            404)
-              echo "Target organization name is available: ${TARGET_ORG}"
-              ;;
-            200)
-              echo "::error::Target organization '${TARGET_ORG}' already exists. Organization migration creates a new organization."
-              exit 1
-              ;;
-            *)
-              echo "::error::Could not verify target organization. HTTP ${status}"
-              jq -r '.message // "Unknown API error"' target-org-check.json || true
-              exit 1
-              ;;
+            404) echo "Target organization name is available: $TARGET_ORG" ;;
+            200) echo "::error::Target organization '$TARGET_ORG' already exists."; exit 1 ;;
+            *) jq -r '.message // "Unknown API error"' /tmp/org.json; exit 1 ;;
           esac
-          rm -f target-org-check.json
 
-      - name: Run GHEC to GHEC EMU organization migration
+      - name: Run organization migration
         id: emu_org_migration
         shell: bash
         env:
@@ -666,70 +681,45 @@ jobs:
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
-          RUN_TYPE: ${{ inputs.emu_run_type }}
         run: |
           set -uo pipefail
-          args=(
-            gh gei migrate-org
-            --github-source-org "$SOURCE_ORG"
-            --github-target-org "$TARGET_ORG"
-            --github-target-enterprise "$TARGET_ENTERPRISE"
-          )
-          if [[ -n "$TARGET_API_URL" ]]; then
-            args+=(--target-api-url "${TARGET_API_URL%/}")
-          fi
-
-          echo "Run classification: ${RUN_TYPE}"
-          echo "Starting organization migration: ${SOURCE_ORG} -> ${TARGET_ENTERPRISE}/${TARGET_ORG}"
+          args=(gh gei migrate-org --github-source-org "$SOURCE_ORG" --github-target-org "$TARGET_ORG" --github-target-enterprise "$TARGET_ENTERPRISE")
+          [[ -z "$TARGET_API_URL" ]] || args+=(--target-api-url "${TARGET_API_URL%/}")
           set +e
           "${args[@]}" 2>&1 | tee emu_org_migration.log
-          migration_exit_code=${PIPESTATUS[0]}
+          rc=${PIPESTATUS[0]}
           set -e
-          echo "exit_code=${migration_exit_code}" >> "$GITHUB_OUTPUT"
-          exit "$migration_exit_code"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
-      - name: Capture GEI logs
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p emu-org-migration-artifacts
-          cp -v emu_org_migration.log emu-org-migration-artifacts/ 2>/dev/null || true
-          cp -v ./*.octoshift*.log emu-org-migration-artifacts/ 2>/dev/null || true
-          tar -czf emu-org-migration-artifacts.tgz emu-org-migration-artifacts
-
-      - name: Publish EMU organization migration summary
+      - name: Publish EMU migration summary
         if: ${{ always() }}
         shell: bash
         env:
           SOURCE_ORG: ${{ inputs.ghec_source_org }}
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
-          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
           RUN_TYPE: ${{ inputs.emu_run_type }}
-          MIGRATION_EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
-          SOURCE_USER: ${{ steps.validate_emu_pats.outputs.source_user }}
-          TARGET_USER: ${{ steps.validate_emu_pats.outputs.target_user }}
+          EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
         run: |
           {
-            echo "## GHEC to GHEC EMU Organization Migration"
+            echo "## EMU organization migration result"
             echo
-            echo "- **Run classification:** \`${RUN_TYPE}\`"
-            echo "- **Source organization:** \`${SOURCE_ORG}\`"
-            echo "- **Target organization:** \`${TARGET_ORG}\`"
-            echo "- **Target enterprise:** \`${TARGET_ENTERPRISE}\`"
-            echo "- **Target API:** \`${TARGET_API_URL:-https://api.github.com}\`"
-            echo "- **Source identity:** \`${SOURCE_USER:-not-available}\`"
-            echo "- **Target identity:** \`${TARGET_USER:-not-available}\`"
-            echo "- **Command exit code:** \`${MIGRATION_EXIT_CODE:-not-available}\`"
+            echo "- Source: \`${SOURCE_ORG}\`"
+            echo "- Target: \`${TARGET_ENTERPRISE}/${TARGET_ORG}\`"
+            echo "- Run type: \`${RUN_TYPE}\`"
+            echo "- Exit code: \`${EXIT_CODE:-not-available}\`"
             echo
-            echo "### Required follow-up"
-            echo "- Review the GEI migration-log repository and Octoshift logs."
-            echo "- Validate repositories, teams, permissions, issues, pull requests, and workflows."
-            echo "- Reclaim mannequins after EMU users have been provisioned."
-            echo "- Reconfigure unsupported operational settings such as secrets, runners, apps, and integrations as applicable."
+            echo "Review the GEI migration-log repository and Octoshift logs, then validate repositories, teams, permissions, issues, pull requests, and workflows."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Capture and upload EMU artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p emu-org-logs
+          cp -v emu_org_migration.log ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
+          tar -czf emu-org-migration-artifacts.tgz emu-org-logs
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
