@@ -903,17 +903,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p emu-org-logs
-
           cp -v emu_org_migration.log emu-org-logs/ 2>/dev/null || true
-          cp -v ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
-          cp -v target-org.json emu-org-logs/ 2>/dev/null || true
-          cp -v target-org-error.log emu-org-logs/ 2>/dev/null || true
-          cp -v repos-api-error.log emu-org-logs/ 2>/dev/null || true
-          cp -v repos-pages.json emu-org-logs/ 2>/dev/null || true
-          cp -v repos.json emu-org-logs/ 2>/dev/null || true
-          cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true
-
-          tar -czf emu-org-migration-artifacts.tgz emu-org-logs
+          cp -v ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true       
+          cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true        
 
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
@@ -922,12 +914,8 @@ jobs:
           name: ghec-to-ghec-emu-org-${{ github.run_id }}
           path: |
             emu_org_migration.log
-            emu-org-migration-artifacts.tgz
             *.octoshift*.log
-            target-org.json
-            target-org-error.log
-            repos-api-error.log
-            repos-pages.json
+            migrated_repositories.csv
           if-no-files-found: warn
 
  
