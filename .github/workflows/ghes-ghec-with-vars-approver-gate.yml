@@ -495,7 +495,7 @@ jobs:
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
-          RUN_TYPE: ${{ inputs.emu_run_type }}
+        
         run: |
           set -euo pipefail
           EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
@@ -510,7 +510,6 @@ jobs:
           echo "Target Org         : ${TARGET_ORG}"
           echo "Target Enterprise  : ${TARGET_ENTERPRISE}"
           echo "Target API URL     : ${EFFECTIVE_TARGET_API_URL}"
-          echo "Run Type           : ${RUN_TYPE}"
           echo "=================================================="
 
           {
@@ -526,7 +525,6 @@ jobs:
             echo "| Target Organization | \`${TARGET_ORG}\` |"
             echo "| Target Enterprise | \`${TARGET_ENTERPRISE}\` |"
             echo "| Target API URL | \`${EFFECTIVE_TARGET_API_URL}\` |"
-            echo "| Run Type | \`${RUN_TYPE}\` |"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -693,20 +691,92 @@ jobs:
           SOURCE_ORG: ${{ inputs.ghec_source_org }}
           TARGET_ORG: ${{ inputs.emu_target_org }}
           TARGET_ENTERPRISE: ${{ inputs.emu_target_enterprise }}
-          RUN_TYPE: ${{ inputs.emu_run_type }}
           EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
+          TARGET_API_URL: ${{ inputs.emu_target_api_url }}
         run: |
+          set +e
+      
+          TARGET_API="${TARGET_API_URL:-https://api.github.com}"
+          TARGET_API="${TARGET_API%/}"
+      
           {
-            echo "## EMU organization migration result"
-            echo
-            echo "- Source: \`${SOURCE_ORG}\`"
-            echo "- Target: \`${TARGET_ENTERPRISE}/${TARGET_ORG}\`"
-            echo "- Run type: \`${RUN_TYPE}\`"
-            echo "- Exit code: \`${EXIT_CODE:-not-available}\`"
-            echo
-            echo "Review the GEI migration-log repository and Octoshift logs, then validate repositories, teams, permissions, issues, pull requests, and workflows."
+            echo "## 🚀 EMU Organization Migration Result"
+            echo ""
+            echo "| Parameter | Value |"
+            echo "|------------|------------|"
+            echo "| Source Organization | \`${SOURCE_ORG}\` |"
+            echo "| Target Organization | \`${TARGET_ORG}\` |"
+            echo "| Target Enterprise | \`${TARGET_ENTERPRISE}\` |"
+            echo "| Run Type | \`${RUN_TYPE}\` |"
+            echo "| Exit Code | \`${EXIT_CODE:-not-available}\` |"
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-
+      
+          #
+          # Only attempt repo inventory when migration succeeded
+          #
+          if [[ "${EXIT_CODE}" == "0" ]]; then
+      
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 📦 Repositories in Target Organization" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+      
+            gh api \
+              --paginate \
+              "/orgs/${TARGET_ORG}/repos?per_page=100" \
+              > repos.json
+      
+            REPO_COUNT=$(jq length repos.json 2>/dev/null)
+      
+            echo "- Total Repositories: **${REPO_COUNT}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+      
+            echo "| Repository | Visibility | Default Branch |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|------------|------------|----------------|" >> "$GITHUB_STEP_SUMMARY"
+      
+            jq -r '
+              .[] |
+              "| \(.name) | \(.visibility) | \(.default_branch) |"
+            ' repos.json >> "$GITHUB_STEP_SUMMARY"
+      
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+      
+            #
+            # Save inventory artifact
+            #
+            jq -r '
+              .[] |
+              [
+                .name,
+                .visibility,
+                .default_branch,
+                .html_url
+              ] | @csv
+            ' repos.json > migrated_repositories.csv
+      
+          else
+      
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> [!CAUTION]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> Repository inventory skipped because migration did not complete successfully." >> "$GITHUB_STEP_SUMMARY"
+      
+          fi
+      
+          {
+            echo ""
+            echo "### ✅ Post Migration Validation Checklist"
+            echo ""
+            echo "- Review GEI migration logs"
+            echo "- Review Octoshift logs"
+            echo "- Validate repositories"
+            echo "- Validate teams and permissions"
+            echo "- Validate issues and pull requests"
+            echo "- Validate Actions workflows"
+            echo "- Reclaim mannequins (EMU)"
+            echo "- Reconfigure secrets, variables, runners, apps, and integrations"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          
       - name: Capture and upload EMU artifacts
         if: ${{ always() }}
         shell: bash
@@ -714,6 +784,7 @@ jobs:
           mkdir -p emu-org-logs
           cp -v emu_org_migration.log ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
           tar -czf emu-org-migration-artifacts.tgz emu-org-logs
+          
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -723,4 +794,14 @@ jobs:
             emu_org_migration.log
             emu-org-migration-artifacts.tgz
             *.octoshift*.log
+          if-no-files-found: warn
+          
+      - name: Upload migrated repository inventory
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: migrated-repositories-${{ github.run_id }}
+          path: |
+            migrated_repositories.csv
+            repos.json
           if-no-files-found: warn
