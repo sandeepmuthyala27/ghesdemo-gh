@@ -904,18 +904,13 @@ jobs:
         run: |
           mkdir -p emu-org-logs
           cp -v emu_org_migration.log emu-org-logs/ 2>/dev/null || true
-          cp -v ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true       
-          cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true        
+          cp -v ./*.octoshift*.log emu-org-logs/ 2>/dev/null || true
+          cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true
 
       - name: Upload EMU migration artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ghec-to-ghec-emu-org-${{ github.run_id }}
-          path: |
-            emu_org_migration.log
-            *.octoshift*.log
-            migrated_repositories.csv
+          path: emu-org-logs/
           if-no-files-found: warn
-
- 
