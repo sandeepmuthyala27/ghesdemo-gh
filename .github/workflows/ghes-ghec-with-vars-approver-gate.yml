@@ -696,7 +696,7 @@ jobs:
 
           # Use the PAT that has access to the target EMU organization.
           # Change EMU_TARGET_PAT if your secret uses a different name.
-          GH_TOKEN: ${{ secrets.EMU_TARGET_PAT }}
+          GH_TOKEN: ${{ secrets.GHEC_EMU_TARGET_PAT }}
 
         run: |
           set -uo pipefail
