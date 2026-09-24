@@ -519,47 +519,104 @@ jobs:
             echo "::error::emu_target_api_url must be a GHE.com base API URL such as https://api.example.ghe.com"
             exit 1
           fi
-
       - name: Validate source and target PATs
         id: validate_emu_pats
         shell: bash
         env:
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
         run: |
-          set -euo pipefail
-          SOURCE_API_URL="https://api.github.com"
-          EFFECTIVE_TARGET_API_URL="${TARGET_API_URL:-https://api.github.com}"
-          EFFECTIVE_TARGET_API_URL="${EFFECTIVE_TARGET_API_URL%/}"
-
-          source_status=$(curl -sS -o source-user.json -w "%{http_code}" \
+          set -uo pipefail
+      
+          TARGET_API="${TARGET_API_URL:-https://api.github.com}"
+          TARGET_API="${TARGET_API%/}"
+      
+          SOURCE_STATUS="FAILED"
+          TARGET_STATUS="FAILED"
+      
+          SOURCE_USER="N/A"
+          TARGET_USER="N/A"
+      
+          SOURCE_HTTP="Unknown"
+          TARGET_HTTP="Unknown"
+      
+          echo "=================================================="
+          echo "Validating SOURCE PAT"
+          echo "=================================================="
+      
+          SOURCE_HTTP=$(curl -sS \
+            -o /tmp/source.json \
+            -w "%{http_code}" \
             -H "Authorization: Bearer ${GH_SOURCE_PAT}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${SOURCE_API_URL}/user")
-          [[ "$source_status" == "200" ]] || {
-            echo "::error::Source PAT validation failed with HTTP ${source_status}"
-            jq -r '.message // "Unknown API error"' source-user.json || true
-            exit 1
-          }
-
-          target_status=$(curl -sS -o target-user.json -w "%{http_code}" \
+            "https://api.github.com/user")
+      
+          if [[ "${SOURCE_HTTP}" == "200" ]]; then
+            SOURCE_STATUS="SUCCESS"
+            SOURCE_USER=$(jq -r '.login // "unknown"' /tmp/source.json)
+            echo "✅ Source PAT Valid"
+            echo "Authenticated User: ${SOURCE_USER}"
+          else
+            echo "❌ Source PAT Invalid"
+            echo "HTTP Status: ${SOURCE_HTTP}"
+          fi
+      
+          echo ""
+          echo "=================================================="
+          echo "Validating TARGET PAT"
+          echo "=================================================="
+      
+          TARGET_HTTP=$(curl -sS \
+            -o /tmp/target.json \
+            -w "%{http_code}" \
             -H "Authorization: Bearer ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${EFFECTIVE_TARGET_API_URL}/user")
-          [[ "$target_status" == "200" ]] || {
-            echo "::error::Target PAT validation failed with HTTP ${target_status}"
-            jq -r '.message // "Unknown API error"' target-user.json || true
+            "${TARGET_API}/user")
+      
+          if [[ "${TARGET_HTTP}" == "200" ]]; then
+            TARGET_STATUS="SUCCESS"
+            TARGET_USER=$(jq -r '.login // "unknown"' /tmp/target.json)
+            echo "✅ Target PAT Valid"
+            echo "Authenticated User: ${TARGET_USER}"
+          else
+            echo "❌ Target PAT Invalid"
+            echo "HTTP Status: ${TARGET_HTTP}"
+          fi
+      
+          echo "source_user=${SOURCE_USER}" >> "$GITHUB_OUTPUT"
+          echo "target_user=${TARGET_USER}" >> "$GITHUB_OUTPUT"
+      
+          echo "source_pat_status=${SOURCE_STATUS}" >> "$GITHUB_OUTPUT"
+          echo "target_pat_status=${TARGET_STATUS}" >> "$GITHUB_OUTPUT"
+      
+          {
+            echo "## 🔑 PAT Validation Summary"
+            echo ""
+            echo "### Authentication Results"
+            echo ""
+            echo "| Token | Status | User | HTTP Code |"
+            echo "|--------|--------|--------|--------|"
+            echo "| Source PAT | $([[ \"$SOURCE_STATUS\" == \"SUCCESS\" ]] && echo '✅ Success' || echo '❌ Failed') | \`${SOURCE_USER}\` | \`${SOURCE_HTTP}\` |"
+            echo "| Target PAT | $([[ \"$TARGET_STATUS\" == \"SUCCESS\" ]] && echo '✅ Success' || echo '❌ Failed') | \`${TARGET_USER}\` | \`${TARGET_HTTP}\` |"
+            echo ""
+            echo "### Migration Identities"
+            echo ""
+            echo "- Source Authenticated User: \`${SOURCE_USER}\`"
+            echo "- Target Authenticated User: \`${TARGET_USER}\`"
+            echo "- Target API Endpoint: \`${TARGET_API}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+      
+          if [[ "${SOURCE_STATUS}" != "SUCCESS" || "${TARGET_STATUS}" != "SUCCESS" ]]; then
+            echo ""
+            echo "❌ One or more PAT validations failed."
             exit 1
-          }
-
-          source_user=$(jq -r '.login // "unknown"' source-user.json)
-          target_user=$(jq -r '.login // "unknown"' target-user.json)
-          echo "source_user=${source_user}" >> "$GITHUB_OUTPUT"
-          echo "target_user=${target_user}" >> "$GITHUB_OUTPUT"
-          echo "target_api_url=${EFFECTIVE_TARGET_API_URL}" >> "$GITHUB_OUTPUT"
-          rm -f source-user.json target-user.json
-
+          fi
+      
+          echo ""
+          echo "✅ Source and Target PAT validation successful."
+            
       - name: Install or update GEI extension
         shell: bash
         run: |
