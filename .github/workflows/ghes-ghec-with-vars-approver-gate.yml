@@ -694,8 +694,7 @@ jobs:
           EXIT_CODE: ${{ steps.emu_org_migration.outputs.exit_code }}
           TARGET_API_URL: ${{ inputs.emu_target_api_url }}
 
-          # Use the PAT that has access to the target EMU organization.
-          # Change EMU_TARGET_PAT if your secret uses a different name.
+          # PAT with access to the target EMU organization.
           GH_TOKEN: ${{ secrets.GHEC_EMU_TARGET_PAT }}
 
         run: |
@@ -704,7 +703,7 @@ jobs:
           TARGET_API="${TARGET_API_URL:-https://api.github.com}"
           TARGET_API="${TARGET_API%/}"
 
-          # Always create the inventory files so the artifact step can upload them.
+          # Always create inventory files so artifact upload does not fail.
           echo '[]' > repos.json
           echo 'repository,visibility,default_branch,html_url' \
             > migrated_repositories.csv
@@ -722,9 +721,7 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          #
           # Only attempt repository inventory when migration succeeded.
-          #
           if [[ "${EXIT_CODE:-}" != "0" ]]; then
             {
               echo "> [!CAUTION]"
@@ -739,9 +736,7 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          #
           # Validate required values.
-          #
           if [[ -z "${TARGET_ORG:-}" ]]; then
             {
               echo "> [!CAUTION]"
@@ -755,18 +750,16 @@ jobs:
             {
               echo "> [!CAUTION]"
               echo "> Repository inventory failed because the target PAT is not available."
-              echo "> Configure the EMU_TARGET_PAT secret with access to the target organization."
+              echo "> Configure the GHEC_EMU_TARGET_PAT secret with access to the target organization."
             } >> "$GITHUB_STEP_SUMMARY"
 
             exit 0
           fi
 
-          #
           # Determine the hostname expected by GitHub CLI.
           #
-          # https://api.github.com             -> github.com
-          # https://api.example.ghe.com        -> example.ghe.com
-          #
+          # https://api.github.com      -> github.com
+          # https://api.example.ghe.com -> example.ghe.com
           if [[ "$TARGET_API" == "https://api.github.com" ]]; then
             TARGET_HOST="github.com"
           else
@@ -780,22 +773,18 @@ jobs:
           echo "GitHub CLI hostname: ${TARGET_HOST}"
           echo "Target organization: ${TARGET_ORG}"
 
-          #
-          # Confirm which account/host gh is using.
-          # This does not print the token.
-          #
+          # Display authentication status without printing the token.
           gh auth status --hostname "$TARGET_HOST" || true
 
-          #
-          # Confirm that the PAT can see the organization.
-          #
+          # Confirm that the target PAT can access the organization.
           if ! gh api \
             --hostname "$TARGET_HOST" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "/orgs/${TARGET_ORG}" \
             --jq '{login: .login, id: .id}' \
-            > target-org.json 2> target-org-error.log; then
+            > target-org.json \
+            2> target-org-error.log; then
 
             API_ERROR="$(tr '\n' ' ' < target-org-error.log)"
 
@@ -803,9 +792,9 @@ jobs:
               echo "> [!CAUTION]"
               echo "> The target organization could not be read using the configured PAT."
               echo ""
-              echo "\`\`\`text"
+              echo '```text'
               echo "${API_ERROR}"
-              echo "\`\`\`"
+              echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 
             exit 0
@@ -814,22 +803,18 @@ jobs:
           echo "Target organization is accessible:"
           cat target-org.json
 
+          # Retrieve all repository pages.
           #
-          # Retrieve every repository visible to the PAT.
-          #
-          # --paginate requests all pages.
-          # --slurp combines page arrays into one outer array.
-          # flatten converts the page arrays into one repository array.
-          #
+          # Do not combine --slurp and --jq because some gh versions do not
+          # support using these options together.
           if ! gh api \
             --hostname "$TARGET_HOST" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             --paginate \
-            --slurp \
             "/orgs/${TARGET_ORG}/repos?per_page=100&type=all" \
-            --jq 'flatten' \
-            > repos.json 2> repos-api-error.log; then
+            > repos-pages.json \
+            2> repos-api-error.log; then
 
             API_ERROR="$(tr '\n' ' ' < repos-api-error.log)"
 
@@ -839,17 +824,27 @@ jobs:
               echo "> [!CAUTION]"
               echo "> The repository API request failed."
               echo ""
-              echo "\`\`\`text"
+              echo '```text'
               echo "${API_ERROR}"
-              echo "\`\`\`"
+              echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 
             exit 0
           fi
 
-          #
-          # Confirm that the response is a valid JSON array.
-          #
+          # Each paginated response is a separate JSON array.
+          # Slurp and flatten them using jq instead of gh api --slurp.
+          if ! jq -s 'flatten' repos-pages.json > repos.json; then
+            {
+              echo "> [!CAUTION]"
+              echo "> Failed to combine the paginated repository responses."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo '[]' > repos.json
+            exit 0
+          fi
+
+          # Confirm that the final response is a JSON array.
           if ! jq -e 'type == "array"' repos.json > /dev/null; then
             {
               echo "> [!CAUTION]"
@@ -887,7 +882,7 @@ jobs:
                   .name,
                   (.visibility // "unknown"),
                   (.default_branch // ""),
-                  .html_url
+                  (.html_url // "")
                 ]
               ) |
               @csv
@@ -899,7 +894,7 @@ jobs:
             {
               echo "> [!WARNING]"
               echo "> No repositories were returned from \`${TARGET_ORG}\`."
-              echo "> Verify that EMU_TARGET_PAT belongs to a user who can access the target organization and its repositories."
+              echo "> Verify that GHEC_EMU_TARGET_PAT can access the target organization and its repositories."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -914,6 +909,7 @@ jobs:
           cp -v target-org.json emu-org-logs/ 2>/dev/null || true
           cp -v target-org-error.log emu-org-logs/ 2>/dev/null || true
           cp -v repos-api-error.log emu-org-logs/ 2>/dev/null || true
+          cp -v repos-pages.json emu-org-logs/ 2>/dev/null || true
           cp -v repos.json emu-org-logs/ 2>/dev/null || true
           cp -v migrated_repositories.csv emu-org-logs/ 2>/dev/null || true
 
@@ -931,14 +927,7 @@ jobs:
             target-org.json
             target-org-error.log
             repos-api-error.log
+            repos-pages.json
           if-no-files-found: warn
 
-      - name: Upload migrated repository inventory
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: migrated-repositories-${{ github.run_id }}
-          path: |
-            migrated_repositories.csv
-            repos.json
-          if-no-files-found: warn
+ 
